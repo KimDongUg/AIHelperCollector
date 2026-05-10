@@ -1,0 +1,58 @@
+{
+  "name": "aihelper-collector",
+  "version": "1.0.0",
+  "description": "AI Helper ERP 부과내역서 엑셀데이터 자동 생성기",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "dependencies": {
+    "playwright": "^1.48.0",
+    "xlsx": "^0.18.5",
+    "dotenv": "^16.4.5",
+    "form-data": "^4.0.0",
+    "node-fetch": "^2.7.0"
+  },
+  "devDependencies": {
+    "electron": "^32.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "com.aihelper.collector",
+    "productName": "AI Helper 수집기",
+    "copyright": "Copyright © 2025 AI Helper",
+    "asar": false,
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "electron/**/*",
+      "playwright/**/*",
+      "assets/**/*",
+      ".env",
+      "node_modules/**/*",
+      "!node_modules/playwright/.local-browsers/**/*",
+      "!node_modules/.cache/**/*"
+    ],
+    "win": {
+      "target": "zip",
+      "icon": "assets/icon.ico",
+      "signingHashAlgorithms": null,
+      "sign": null,
+      "certificateFile": null,
+      "certificatePassword": null
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerHeaderIcon": "assets/icon.ico",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "AI Helper 수집기"
+    }
+  }
+}
