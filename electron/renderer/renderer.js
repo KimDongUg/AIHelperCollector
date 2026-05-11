@@ -41,7 +41,7 @@ btnOpenERP.addEventListener('click', async () => {
   if (!url) { setStatus('red', 'ERP URL을 입력해주세요.'); return; }
   btnOpenERP.disabled = true;
   setStatus('blue', 'ERP 브라우저 실행 중...');
-  const result = await window.api.openERP();
+  const result = await window.api.openERP(url);
   if (result.ok) {
     loginHint.style.display = 'block';
     btnStart.disabled = false;

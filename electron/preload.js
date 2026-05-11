@@ -2,7 +2,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('api', {
   getErpUrl: () => ipcRenderer.invoke('get-erp-url'),
-  openERP: () => ipcRenderer.invoke('open-erp'),
+  openERP: (url) => ipcRenderer.invoke('open-erp', url),
   startCollect: () => ipcRenderer.invoke('start-collect'),
   stopCollect: () => ipcRenderer.invoke('stop-collect'),
   openExcel: (filePath) => ipcRenderer.invoke('open-excel', filePath),

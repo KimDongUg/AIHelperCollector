@@ -35,10 +35,10 @@ app.on('window-all-closed', () => {
 ipcMain.handle('get-erp-url', () => process.env.ERP_URL || '');
 
 // ERP 브라우저 열기
-ipcMain.handle('open-erp', async () => {
+ipcMain.handle('open-erp', async (_e, url) => {
   const { openERP } = require('../playwright/browser');
   try {
-    await openERP(process.env.ERP_URL);
+    await openERP(url || process.env.ERP_URL);
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e.message };
