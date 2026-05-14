@@ -1,55 +1,89 @@
 let lastExcelPath = null;
 let isCollecting = false;
 
-const erpUrlInput = document.getElementById('erpUrl');
-const btnOpenERP = document.getElementById('btnOpenERP');
-const btnStart = document.getElementById('btnStart');
-const btnStop = document.getElementById('btnStop');
-const btnOpenExcel = document.getElementById('btnOpenExcel');
-const btnUpload = document.getElementById('btnUpload');
-const btnOpenLogs = document.getElementById('btnOpenLogs');
-const loginHint = document.getElementById('loginHint');
-const progressSection = document.getElementById('progressSection');
-const resultSection = document.getElementById('resultSection');
-const progressFill = document.getElementById('progressFill');
-const progressCount = document.getElementById('progressCount');
-const progressPct = document.getElementById('progressPct');
-const currentUnit = document.getElementById('currentUnit');
-const statusDot = document.getElementById('statusDot');
-const statusText = document.getElementById('statusText');
-const failSection = document.getElementById('failSection');
-const failTitle = document.getElementById('failTitle');
-const failList = document.getElementById('failList');
+const cdpPortInput     = document.getElementById('cdpPort');
+const btnOpenErpBrowser = document.getElementById('btnOpenErpBrowser');
+const btnConnectERP    = document.getElementById('btnConnectERP');
+const connectStatus    = document.getElementById('connectStatus');
+const btnStart         = document.getElementById('btnStart');
+const btnStop          = document.getElementById('btnStop');
+const btnOpenExcel     = document.getElementById('btnOpenExcel');
+const btnUpload        = document.getElementById('btnUpload');
+const btnOpenLogs      = document.getElementById('btnOpenLogs');
+const progressSection  = document.getElementById('progressSection');
+const resultSection    = document.getElementById('resultSection');
+const progressFill     = document.getElementById('progressFill');
+const progressCount    = document.getElementById('progressCount');
+const progressPct      = document.getElementById('progressPct');
+const currentUnit      = document.getElementById('currentUnit');
+const statusDot        = document.getElementById('statusDot');
+const statusText       = document.getElementById('statusText');
+const failSection      = document.getElementById('failSection');
+const failTitle        = document.getElementById('failTitle');
+const failList         = document.getElementById('failList');
 
 function setStatus(type, text) {
   statusDot.className = 'status-dot';
-  if (type === 'green') statusDot.classList.add('green');
-  else if (type === 'blue') statusDot.classList.add('blue');
-  else if (type === 'red') statusDot.classList.add('red');
-  else if (type === 'orange') statusDot.classList.add('orange');
+  if (type) statusDot.classList.add(type);
   statusText.textContent = text;
 }
 
-// ERP URL 로드
-window.api.getErpUrl().then((url) => {
-  if (url) erpUrlInput.value = url;
+function showConnectStatus(type, text) {
+  connectStatus.className = 'connect-status ' + type;
+  connectStatus.textContent = text;
+}
+
+function hideConnectStatus() {
+  connectStatus.className = 'connect-status';
+  connectStatus.textContent = '';
+}
+
+// ERP 열기 — Edge/Chrome을 remote-debugging 모드로 실행
+btnOpenErpBrowser.addEventListener('click', async () => {
+  const port = parseInt(cdpPortInput.value, 10) || 9222;
+  btnOpenErpBrowser.disabled = true;
+  hideConnectStatus();
+  setStatus('blue', 'ERP 브라우저 실행 중...');
+
+  const result = await window.api.openErpBrowser(port);
+
+  btnOpenErpBrowser.disabled = false;
+
+  if (result.ok) {
+    setStatus('orange', 'ERP 로그인 & 2차 인증 완료 후 [ERP 브라우저 연결]을 클릭하세요.');
+  } else {
+    setStatus('red', result.error || '브라우저 실행 실패');
+  }
 });
 
-// ERP 열기
-btnOpenERP.addEventListener('click', async () => {
-  const url = erpUrlInput.value.trim();
-  if (!url) { setStatus('red', 'ERP URL을 입력해주세요.'); return; }
-  btnOpenERP.disabled = true;
-  setStatus('blue', 'ERP 브라우저 실행 중...');
-  const result = await window.api.openERP(url);
+// ERP 브라우저 연결 — CDP로 연결 시도
+btnConnectERP.addEventListener('click', async () => {
+  const port = parseInt(cdpPortInput.value, 10) || 9222;
+  btnConnectERP.disabled = true;
+  hideConnectStatus();
+  setStatus('blue', `CDP 연결 중 (포트 ${port})...`);
+
+  const result = await window.api.connectERP(port);
+
+  btnConnectERP.disabled = false;
+
   if (result.ok) {
-    loginHint.style.display = 'block';
+    showConnectStatus('success', '✅ 현재 로그인된 ERP 연결 완료');
     btnStart.disabled = false;
-    setStatus('orange', 'ERP 로그인 후 [수집 시작]을 클릭하세요.');
+    setStatus('green', 'ERP 연결됨 — 수집을 시작하세요.');
+  } else if (result.error === 'no_browser') {
+    showConnectStatus('error', '❌ ERP 브라우저를 먼저 실행해주세요');
+    btnStart.disabled = true;
+    setStatus('red', 'ERP 브라우저 미연결');
+  } else if (result.error === 'no_erp_tab') {
+    showConnectStatus('warning', '⚠️ ERP 페이지를 찾을 수 없습니다. 브라우저에서 ERP를 열어주세요');
+    btnStart.disabled = true;
+    setStatus('orange', 'ERP 탭 없음');
   } else {
-    setStatus('red', '브라우저 실행 실패: ' + result.error);
+    showConnectStatus('error', '❌ 연결 실패: ' + (result.error || '알 수 없는 오류'));
+    btnStart.disabled = true;
+    setStatus('red', '연결 실패');
   }
-  btnOpenERP.disabled = false;
 });
 
 // 수집 시작
@@ -58,7 +92,8 @@ btnStart.addEventListener('click', async () => {
   btnStart.style.display = 'none';
   btnStop.style.display = 'block';
   btnStop.disabled = false;
-  btnOpenERP.disabled = true;
+  btnConnectERP.disabled = true;
+  btnOpenErpBrowser.disabled = true;
   progressSection.classList.add('visible');
   resultSection.classList.remove('visible');
   lastExcelPath = null;
@@ -78,7 +113,8 @@ btnStop.addEventListener('click', async () => {
   btnStop.style.display = 'none';
   btnStart.style.display = 'block';
   btnStart.disabled = false;
-  btnOpenERP.disabled = false;
+  btnConnectERP.disabled = false;
+  btnOpenErpBrowser.disabled = false;
 });
 
 function handleProgress(data) {
@@ -97,7 +133,8 @@ function finishCollect(result) {
   btnStop.style.display = 'none';
   btnStart.style.display = 'block';
   btnStart.disabled = false;
-  btnOpenERP.disabled = false;
+  btnConnectERP.disabled = false;
+  btnOpenErpBrowser.disabled = false;
 
   if (result && result.ok) {
     lastExcelPath = result.filePath;
@@ -107,9 +144,8 @@ function finishCollect(result) {
     if (result.failedUnits && result.failedUnits.length > 0) {
       failSection.classList.add('visible');
       failTitle.textContent = `실패 세대 ${result.failedUnits.length}건`;
-      failList.innerHTML = result.failedUnits.map(u => `• ${u}`).join('<br>');
+      failList.innerHTML = result.failedUnits.map((u) => `• ${u}`).join('<br>');
     }
-    // 진행률 100%
     progressFill.style.width = '100%';
     progressCount.textContent = `${result.total} / ${result.total} 세대`;
     progressPct.textContent = '100%';

@@ -1,15 +1,15 @@
 const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const { exec } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 let mainWindow;
-let collectorProcess = null;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 560,
-    height: 780,
+    height: 820,
     resizable: false,
     title: 'AI Helper 수집기',
     icon: path.join(__dirname, '..', 'assets', 'icon.ico'),
@@ -27,19 +27,31 @@ function createWindow() {
 app.whenReady().then(createWindow);
 
 app.on('window-all-closed', () => {
-  if (collectorProcess) collectorProcess.kill();
+  const { disconnectBrowser } = require('../playwright/browser');
+  disconnectBrowser().catch(() => {});
   app.quit();
 });
 
-// ERP URL 읽기
-ipcMain.handle('get-erp-url', () => process.env.ERP_URL || '');
+// ERP 브라우저 열기 (remote-debugging 모드로 Edge/Chrome 실행)
+ipcMain.handle('open-erp-browser', async (_e, port) => {
+  const cdpPort = port || 9222;
 
-// ERP 브라우저 열기
-ipcMain.handle('open-erp', async (_e, url) => {
-  const { openERP } = require('../playwright/browser');
+  return new Promise((resolve) => {
+    exec(`start msedge --remote-debugging-port=${cdpPort}`, { shell: true }, (err) => {
+      if (!err) { resolve({ ok: true }); return; }
+      exec(`start chrome --remote-debugging-port=${cdpPort}`, { shell: true }, (err2) => {
+        if (!err2) { resolve({ ok: true }); return; }
+        resolve({ ok: false, error: 'Edge 또는 Chrome이 설치되어 있지 않습니다.' });
+      });
+    });
+  });
+});
+
+// ERP 브라우저 CDP 연결
+ipcMain.handle('connect-erp', async (_e, port) => {
+  const { connectERP } = require('../playwright/browser');
   try {
-    await openERP(url || process.env.ERP_URL);
-    return { ok: true };
+    return await connectERP(port);
   } catch (e) {
     return { ok: false, error: e.message };
   }
@@ -87,8 +99,7 @@ ipcMain.handle('select-output-dir', async () => {
 ipcMain.handle('upload-to-server', async (_e, filePath) => {
   const { uploadFile } = require('../playwright/uploader');
   try {
-    const result = await uploadFile(filePath, process.env.AIHELPER_UPLOAD_URL, process.env.AIHELPER_API_KEY);
-    return result;
+    return await uploadFile(filePath, process.env.AIHELPER_UPLOAD_URL, process.env.AIHELPER_API_KEY);
   } catch (e) {
     return { ok: false, error: e.message };
   }

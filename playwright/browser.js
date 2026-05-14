@@ -1,65 +1,72 @@
 const { chromium } = require('playwright');
-const path = require('path');
 
 let browser = null;
-let page = null;
+let connectedPage = null;
 
-async function openERP(erpUrl) {
-  if (!erpUrl) throw new Error('ERP_URL이 설정되지 않았습니다. .env 파일을 확인하세요.');
+async function connectERP(cdpPort) {
+  const port = cdpPort || 9222;
 
-  // 이미 열려 있으면 재사용
-  if (browser && browser.isConnected()) {
-    const pages = browser.contexts()[0]?.pages() || [];
-    if (pages.length > 0) {
-      page = pages[0];
-      await page.bringToFront();
-      return page;
+  if (browser) {
+    try { await browser.close(); } catch {}
+    browser = null;
+    connectedPage = null;
+  }
+
+  try {
+    browser = await chromium.connectOverCDP(`http://localhost:${port}`);
+  } catch {
+    return { ok: false, error: 'no_browser' };
+  }
+
+  const page = await findERPPage(browser);
+
+  if (!page) {
+    return { ok: false, error: 'no_erp_tab' };
+  }
+
+  connectedPage = page;
+  return { ok: true };
+}
+
+async function findERPPage(browser) {
+  const contexts = browser.contexts();
+  if (!contexts || contexts.length === 0) return null;
+
+  const erpKeywords = ['erp', 'xp-erp', 'xperp', '관리비', 'mms', 'apt', 'apartment'];
+
+  for (const ctx of contexts) {
+    for (const p of ctx.pages()) {
+      try {
+        const url = p.url().toLowerCase();
+        const title = (await p.title()).toLowerCase();
+        if (erpKeywords.some((k) => url.includes(k) || title.includes(k))) {
+          return p;
+        }
+      } catch {
+        // 접근 불가 탭 건너뜀
+      }
     }
   }
 
-  // 시스템에 설치된 Edge 또는 Chrome 사용 (설치 파일 크기 최소화)
-  const launchOpts = {
-    headless: false,
-    slowMo: 80,
-    args: ['--start-maximized'],
-  };
-
-  // 시스템 브라우저 채널 시도: msedge → chrome → 기본 chromium 순서
-  for (const channel of ['msedge', 'chrome']) {
-    try {
-      browser = await chromium.launch({ ...launchOpts, channel });
-      break;
-    } catch {
-      // 해당 채널 없으면 다음 시도
-    }
-  }
-  if (!browser) {
-    browser = await chromium.launch(launchOpts);
-  }
-
-  const context = await browser.newContext({
-    viewport: null,
-    locale: 'ko-KR',
-  });
-
-  page = await context.newPage();
-  await page.goto(erpUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-  return page;
+  return null;
 }
 
 async function getPage() {
-  if (!browser || !browser.isConnected()) throw new Error('ERP 브라우저가 열려있지 않습니다. [ERP 열기]를 먼저 클릭하세요.');
-  const pages = browser.contexts()[0]?.pages() || [];
-  if (pages.length === 0) throw new Error('ERP 페이지가 닫혔습니다. 다시 열어주세요.');
-  return pages[0];
+  if (!browser || !browser.isConnected()) {
+    throw new Error('ERP 브라우저가 연결되지 않았습니다. [ERP 브라우저 연결]을 먼저 클릭하세요.');
+  }
+  if (!connectedPage) {
+    throw new Error('ERP 페이지를 찾을 수 없습니다. 브라우저에서 ERP를 열어주세요.');
+  }
+  return connectedPage;
 }
 
-async function closeBrowser() {
+async function disconnectBrowser() {
   if (browser) {
-    await browser.close();
+    try { await browser.close(); } catch {}
     browser = null;
-    page = null;
+    connectedPage = null;
   }
 }
 
-module.exports = { openERP, getPage, closeBrowser };
+module.exports = { connectERP, getPage, disconnectBrowser };
