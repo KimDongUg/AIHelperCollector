@@ -361,33 +361,52 @@ async function clickMenuByText(page, text) {
   } catch {}
 }
 
-/** 단일 frame 내에서 조회 버튼 클릭 */
+/** 단일 frame/page 내에서 조회 버튼 클릭 — 사이드바 메뉴 제외 */
 async function clickSearchButton(target) {
-  // 1) ID로 찾기
+  // 1) JS evaluate: 좌측 메뉴(사이드바)를 제외한 가시 요소에서 조회 클릭
   try {
-    const el = target.locator('#BTN_INQUIRY').first();
-    if (await el.count() > 0) { await el.evaluate(n => n.click()); return; }
-  } catch {}
+    const clicked = await target.evaluate(() => {
+      // 사이드바/메뉴 컨테이너 식별
+      const sidebar = document.querySelector(
+        '.lnb, #lnb, .sidebar, .left-menu, nav.menu, #leftMenu, #gnb, .gnb'
+      );
 
-  // 2) JS 직접 실행 — XpERP 내부 함수 호출 또는 BTN_INQUIRY.click()
-  try {
-    await target.evaluate(() => {
-      const btn = document.getElementById('BTN_INQUIRY')
-        || document.querySelector('a.basic_btn[class*="blue"]')
-        || document.querySelector('a.btn_blue');
-      if (btn) { btn.click(); return; }
-      if (typeof doCommonSubmit === 'function') doCommonSubmit('inquiry');
-      else if (typeof fnSearch === 'function') fnSearch();
-      else if (typeof fn_search === 'function') fn_search();
+      // 1순위: BTN_INQUIRY ID (사이드바 외)
+      const byId = document.getElementById('BTN_INQUIRY');
+      if (byId && byId.offsetParent !== null && !(sidebar && sidebar.contains(byId))) {
+        byId.click(); return true;
+      }
+
+      // 2순위: 텍스트가 정확히 "조회"인 가시 요소 (사이드바 제외)
+      const all = Array.from(document.querySelectorAll('a, button, input[type="button"]'));
+      const btn = all.find(el => {
+        const txt = el.innerText?.trim().replace(/\s+/g, '');
+        return txt === '조회' &&
+               el.offsetParent !== null &&
+               !(sidebar && sidebar.contains(el));
+      });
+      if (btn) { btn.click(); return true; }
+
+      // 3순위: XpERP 내부 JS 함수 직접 호출
+      if (typeof doCommonSubmit === 'function') { doCommonSubmit('inquiry'); return true; }
+      if (typeof fn_search === 'function') { fn_search(); return true; }
+      return false;
     });
-    return;
+    if (clicked) return;
   } catch {}
 
-  // 3) 클래스 기반 (메뉴 링크 제외)
-  try {
-    const el = target.locator('a.basic_btn, a.btn_blue').first();
-    if (await el.count() > 0) { await el.evaluate(n => n.click()); return; }
-  } catch {}
+  // 2) 모든 frame 순회해서 시도
+  for (const f of target.page ? [target.page()] : []) {
+    for (const frame of f.frames()) {
+      try {
+        await frame.evaluate(() => {
+          const btn = document.getElementById('BTN_INQUIRY');
+          if (btn) { btn.click(); return; }
+          if (typeof doCommonSubmit === 'function') doCommonSubmit('inquiry');
+        });
+      } catch {}
+    }
+  }
 }
 
 async function getFrame(page) {
