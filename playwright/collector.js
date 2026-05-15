@@ -3,18 +3,18 @@
  *
  * 사용 방법:
  *   1. XpERP에서 입주자현황 → 개인정보 표시 체크 → 조회
- *   2. XpERP에서 관리비조회 → 조회  (동호내역 목록 표시된 상태)
+ *   2. XpERP에서 관리비조회 → 조회 (동호내역 목록 표시된 상태)
  *   3. AI Helper 수집기 [수집 시작] 클릭
  *
- * 수집기는 메뉴 탐색/버튼 클릭을 직접 하지 않고,
- * 이미 열린 탭의 데이터를 읽어 수집합니다.
+ * CDP 연결 방식에서는 frame.evaluate()가 하위 iframe에서 실패할 수 있어
+ * page.evaluate() + iframe.contentDocument 접근 방식을 사용합니다.
  */
 
 const path = require('path');
 const fs   = require('fs');
-const { getPage }    = require('./browser');
-const { exportExcel} = require('./exportExcel');
-const { saveErrorLog}= require('./logger');
+const { getPage }     = require('./browser');
+const { exportExcel } = require('./exportExcel');
+const { saveErrorLog }= require('./logger');
 
 let stopFlag = false;
 function stopCollect() { stopFlag = true; }
@@ -34,20 +34,18 @@ async function runCollect(onProgress) {
   const failedUnits = [];
 
   try {
-    // 1단계: 이미 열린 입주자현황 탭에서 동/호/휴대폰 읽기
-    onProgress({ current: 0, total: 0, unit: '① 입주자현황 데이터 읽는 중...' });
-    const residentMap = await readResidentFromOpenTab(page);
+    // 1단계: 입주자현황에서 동/호/휴대폰 읽기
+    onProgress({ current: 0, total: 0, unit: '① 입주자현황 읽는 중...' });
+    const residentMap = await readResidentViaIframe(page);
 
-    // 2단계: 이미 열린 관리비조회 탭에서 동호 목록 읽기
+    // 2단계: 관리비조회 동호 목록 읽기
     onProgress({ current: 0, total: 0, unit: '② 관리비조회 목록 읽는 중...' });
-    const feeUnitResult = await readFeeUnitsFromOpenTab(page);
-    const { feeFrame, feeUnits } = feeUnitResult;
+    const feeUnits = await readFeeUnitsViaIframe(page);
 
     if (!feeUnits.length) {
-      const debug = feeUnitResult.debugInfo ? `\n[진단: ${feeUnitResult.debugInfo}]` : '';
       return {
         ok: false,
-        error: `관리비조회 동호내역이 없습니다.\nXpERP에서 관리비조회 → 조회 버튼을 먼저 클릭해주세요.${debug}`,
+        error: '관리비조회 동호내역이 없습니다.\nXpERP에서 관리비조회 → 조회 버튼을 먼저 클릭해주세요.',
       };
     }
 
@@ -61,14 +59,10 @@ async function runCollect(onProgress) {
       onProgress({ current: i + 1, total, unit: unit.dongho });
 
       try {
-        // 동호내역 행 클릭
-        const rows = await feeFrame.$$('table tbody tr');
-        if (rows[unit._rowIndex]) {
-          await rows[unit._rowIndex].evaluate(el => el.click());
-        }
+        await clickFeeUnitViaIframe(page, unit._rowIndex);
         await page.waitForTimeout(400);
 
-        const feeData = await collectUnitFeeData(feeFrame);
+        const feeData = await collectFeeDataViaIframe(page);
         const phone   = residentMap[`${unit.dong}-${unit.ho}`] || '';
 
         allData.push({ dong: unit.dong, ho: unit.ho, phone, ...feeData });
@@ -98,22 +92,58 @@ async function runCollect(onProgress) {
 }
 
 /* ═══════════════════════════════════════════════════════════
- *  입주자현황: 이미 열린 탭에서 동/호 → 휴대폰 맵 읽기
+ *  공통: page.evaluate()에서 특정 iframe의 document 찾기
+ *  iframeKeyword: iframe URL에 포함된 문자열 (예: 'occp_020' = 입주자현황)
  * ═══════════════════════════════════════════════════════════ */
-async function readResidentFromOpenTab(page) {
-  // 입주자현황 frame 탐지 (키워드: 입주여부, 주거형태)
-  const frame = await findFrameByKeywords(page, ['입주여부', '주거형태', '입주자현황']);
-  if (!frame) return {}; // 탭이 없으면 빈 맵 반환 (휴대폰 없이 수집 계속)
+function getIframeDocScript(keyword) {
+  // page.evaluate() 내에서 실행 — iframe.contentDocument 접근
+  return `
+    (function(kw) {
+      const iframes = Array.from(document.querySelectorAll('iframe'));
+      for (const f of iframes) {
+        try {
+          const src = f.src || '';
+          if (kw && !src.includes(kw)) continue;
+          const d = f.contentDocument || f.contentWindow && f.contentWindow.document;
+          if (d && d.body) return d;
+        } catch {}
+      }
+      // keyword 없으면 첫 번째 접근 가능한 iframe
+      for (const f of iframes) {
+        try {
+          const d = f.contentDocument || f.contentWindow && f.contentWindow.document;
+          if (d && d.body) return d;
+        } catch {}
+      }
+      return null;
+    })('${keyword}')
+  `;
+}
 
-  return await frame.evaluate(() => {
-    const map  = {};
-    const rows = document.querySelectorAll('table tbody tr');
+/* ═══════════════════════════════════════════════════════════
+ *  입주자현황: 동/호 → 휴대폰 맵
+ * ═══════════════════════════════════════════════════════════ */
+async function readResidentViaIframe(page) {
+  return await page.evaluate(() => {
+    const map = {};
+    // 입주자현황 iframe: occp_020 포함
+    const iframes = Array.from(document.querySelectorAll('iframe'));
+    let doc = null;
+    for (const f of iframes) {
+      try {
+        const src = f.src || '';
+        if (!src.includes('occp_020')) continue;
+        const d = f.contentDocument || (f.contentWindow && f.contentWindow.document);
+        if (d && d.body) { doc = d; break; }
+      } catch {}
+    }
+    if (!doc) return map;
+
+    const rows = doc.querySelectorAll('table tbody tr');
     let lastDong = '';
-
     for (const row of rows) {
       const tds = Array.from(row.querySelectorAll('td'));
       if (!tds.length) continue;
-
       let dong, ho, phone;
       if (tds.length >= 10) {
         dong  = tds[0].innerText.trim();
@@ -125,7 +155,6 @@ async function readResidentFromOpenTab(page) {
         ho    = tds[0].innerText.trim();
         phone = tds[8].innerText.trim();
       } else { continue; }
-
       if (!ho || ho === '합계') continue;
       map[`${lastDong}-${ho}`] = phone;
     }
@@ -134,60 +163,109 @@ async function readResidentFromOpenTab(page) {
 }
 
 /* ═══════════════════════════════════════════════════════════
- *  관리비조회: 이미 열린 탭에서 동호 목록 읽기
- *  — 모든 frame에서 "1-101" 패턴 테이블을 직접 탐색
+ *  관리비조회: 동호 목록 읽기
  * ═══════════════════════════════════════════════════════════ */
-async function readFeeUnitsFromOpenTab(page) {
-  const allFrames = page.frames();
-  const frameUrls = allFrames.map(f => f.url().split('?')[0]).join(' | ');
-
-  for (const f of allFrames) {
-    const url = f.url();
-    if (!url || url === 'about:blank' || url === 'about:srcdoc') continue;
-
-    try {
-      const units = await f.evaluate(() => {
-        const result = [];
-        // "N - N" 또는 "N-N" 패턴 셀이 있는 테이블 탐색
-        for (const table of document.querySelectorAll('table')) {
-          const hasDongho = Array.from(table.querySelectorAll('td')).some(
-            td => /^\d+\s*-\s*\d+$/.test(td.innerText?.trim())
+async function readFeeUnitsViaIframe(page) {
+  return await page.evaluate(() => {
+    const result = [];
+    // 관리비조회 iframe: occp_010 포함
+    const iframes = Array.from(document.querySelectorAll('iframe'));
+    let doc = null;
+    for (const f of iframes) {
+      try {
+        const src = f.src || '';
+        if (!src.includes('occp_010')) continue;
+        const d = f.contentDocument || (f.contentWindow && f.contentWindow.document);
+        if (d && d.body) { doc = d; break; }
+      } catch {}
+    }
+    // fallback: "N-N" 패턴 셀이 있는 iframe
+    if (!doc) {
+      for (const f of iframes) {
+        try {
+          const d = f.contentDocument || (f.contentWindow && f.contentWindow.document);
+          if (!d) continue;
+          const hasDongho = Array.from(d.querySelectorAll('td')).some(
+            td => /^\d+\s*-\s*\d+$/.test((td.innerText || '').trim())
           );
-          if (!hasDongho) continue;
-
-          Array.from(table.querySelectorAll('tbody tr')).forEach((row, idx) => {
-            const tds = Array.from(row.querySelectorAll('td'));
-            const dongho = tds[0]?.innerText?.trim() || '';
-            const m = dongho.match(/^(\d+)\s*-\s*(\d+)$/);
-            if (m) result.push({ dongho, dong: m[1], ho: m[2], _rowIndex: idx });
-          });
-          if (result.length > 0) break;
-        }
-        return result;
-      });
-
-      if (units.length > 0) {
-        return { feeFrame: f, feeUnits: units };
+          if (hasDongho) { doc = d; break; }
+        } catch {}
       }
-    } catch {}
-  }
+    }
+    if (!doc) return result;
 
-  // 모든 frame 실패 시 진단 정보 포함 오류
-  return {
-    feeFrame: page,
-    feeUnits: [],
-    debugInfo: `열린 frame URLs: ${frameUrls}`,
-  };
+    for (const table of doc.querySelectorAll('table')) {
+      const hasDongho = Array.from(table.querySelectorAll('td')).some(
+        td => /^\d+\s*-\s*\d+$/.test((td.innerText || '').trim())
+      );
+      if (!hasDongho) continue;
+
+      Array.from(table.querySelectorAll('tbody tr')).forEach((row, idx) => {
+        const tds    = Array.from(row.querySelectorAll('td'));
+        const dongho = (tds[0]?.innerText || '').trim();
+        const m      = dongho.match(/^(\d+)\s*-\s*(\d+)$/);
+        if (m) result.push({ dongho, dong: m[1], ho: m[2], _rowIndex: idx });
+      });
+      if (result.length > 0) break;
+    }
+    return result;
+  });
+}
+
+/* ═══════════════════════════════════════════════════════════
+ *  관리비조회: 특정 호 행 클릭
+ * ═══════════════════════════════════════════════════════════ */
+async function clickFeeUnitViaIframe(page, rowIndex) {
+  await page.evaluate((idx) => {
+    const iframes = Array.from(document.querySelectorAll('iframe'));
+    for (const f of iframes) {
+      try {
+        const src = f.src || '';
+        const d = f.contentDocument || (f.contentWindow && f.contentWindow.document);
+        if (!d) continue;
+        const hasDongho = src.includes('occp_010') ||
+          Array.from(d.querySelectorAll('td')).some(
+            td => /^\d+\s*-\s*\d+$/.test((td.innerText || '').trim())
+          );
+        if (!hasDongho) continue;
+
+        for (const table of d.querySelectorAll('table')) {
+          const rows = Array.from(table.querySelectorAll('tbody tr'));
+          if (rows[idx]) { rows[idx].click(); return; }
+        }
+      } catch {}
+    }
+  }, rowIndex);
 }
 
 /* ═══════════════════════════════════════════════════════════
  *  관리비조회: 선택된 호의 모든 데이터 수집
  * ═══════════════════════════════════════════════════════════ */
-async function collectUnitFeeData(frame) {
-  return await frame.evaluate(() => {
+async function collectFeeDataViaIframe(page) {
+  return await page.evaluate(() => {
     const data = {};
-    const tables = Array.from(document.querySelectorAll('table')).slice(1);
+    const iframes = Array.from(document.querySelectorAll('iframe'));
+    let doc = null;
+    for (const f of iframes) {
+      try {
+        const src = f.src || '';
+        if (!src.includes('occp_010')) continue;
+        const d = f.contentDocument || (f.contentWindow && f.contentWindow.document);
+        if (d && d.body) { doc = d; break; }
+      } catch {}
+    }
+    if (!doc) {
+      // fallback: 첫 번째 접근 가능한 iframe
+      for (const f of iframes) {
+        try {
+          const d = f.contentDocument || (f.contentWindow && f.contentWindow.document);
+          if (d && d.body) { doc = d; break; }
+        } catch {}
+      }
+    }
+    if (!doc) return data;
 
+    const tables = Array.from(doc.querySelectorAll('table')).slice(1);
     tables.forEach((table) => {
       let sectionName = '';
       let prev = table.previousElementSibling;
@@ -227,8 +305,8 @@ async function collectUnitFeeData(frame) {
       });
     });
 
-    // input readonly 요약값 수집
-    document.querySelectorAll('input[readonly], input[disabled]').forEach(inp => {
+    // input readonly 요약값
+    doc.querySelectorAll('input[readonly], input[disabled]').forEach(inp => {
       const label = inp.previousSibling?.textContent?.trim()
         || inp.parentElement?.previousElementSibling?.innerText?.trim();
       const val = inp.value?.replace(/,/g, '');
@@ -237,27 +315,6 @@ async function collectUnitFeeData(frame) {
 
     return data;
   });
-}
-
-/* ═══════════════════════════════════════════════════════════
- *  helpers
- * ═══════════════════════════════════════════════════════════ */
-
-/** 키워드로 올바른 iframe frame 탐지 */
-async function findFrameByKeywords(page, keywords) {
-  // 메인 프레임 포함 전체 frame 순회
-  for (const f of page.frames()) {
-    const url = f.url();
-    if (!url || url === 'about:blank' || url === 'about:srcdoc') continue;
-    try {
-      const ok = await f.evaluate(
-        (kws) => kws.some(k => (document.body?.innerText || '').includes(k)),
-        keywords
-      );
-      if (ok) return f;
-    } catch {}
-  }
-  return null;
 }
 
 module.exports = { runCollect, stopCollect };
