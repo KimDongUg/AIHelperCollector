@@ -18,9 +18,10 @@ const { saveErrorLog }= require('./logger');
 let stopFlag = false;
 function stopCollect() { stopFlag = true; }
 
-// 각 페이지 iframe 셀렉터 (URL 패턴)
-const SEL_FEE      = 'iframe[src*="occp_010"]'; // 관리비조회
-const SEL_RESIDENT = 'iframe[src*="occp_020"]'; // 입주자현황
+// 관리비조회 iframe 셀렉터 — URL에 010m01 또는 OCCP1010/RECP1010 포함
+const SEL_FEE      = 'iframe[src*="010m01"], iframe[src*="OCCP1010"], iframe[src*="RECP1010"]';
+// 입주자현황 iframe 셀렉터 — URL에 020m0 또는 IMPO2020/OCCP19940 포함
+const SEL_RESIDENT = 'iframe[src*="020m"], iframe[src*="IMPO2020"], iframe[src*="OCCP19940"]';
 
 /* ═══════════════════════════════════════════════════════════
  *  MAIN
@@ -158,9 +159,9 @@ async function readFeeUnitList(page) {
     if (units.length) return units;
   } catch {}
 
-  // 방법 2: 모든 frame에서 직접 evaluate
+  // 방법 2: URL 필터 없이 모든 frame 순회
   for (const f of page.frames()) {
-    if (!f.url().includes('occp_010')) continue;
+    if (f === page.mainFrame()) continue;
     try {
       const units = await f.evaluate(() => {
         const result = [];
@@ -198,17 +199,22 @@ async function clickFeeUnit(page, rowIndex) {
     return;
   } catch {}
 
-  // 방법 2: frame.evaluate
+  // 방법 2: 모든 frame 순회
   for (const f of page.frames()) {
-    if (!f.url().includes('occp_010')) continue;
+    if (f === page.mainFrame()) continue;
     try {
-      await f.evaluate((idx) => {
+      const clicked = await f.evaluate((idx) => {
         for (const table of document.querySelectorAll('table')) {
+          const hasDongho = Array.from(table.querySelectorAll('td')).some(
+            td => /^\d+\s*-\s*\d+$/.test((td.innerText || '').trim())
+          );
+          if (!hasDongho) continue;
           const rows = Array.from(table.querySelectorAll('tbody tr'));
-          if (rows[idx]) { rows[idx].click(); return; }
+          if (rows[idx]) { rows[idx].click(); return true; }
         }
+        return false;
       }, rowIndex);
-      return;
+      if (clicked) return;
     } catch {}
   }
 }
@@ -271,10 +277,13 @@ async function collectFeeData(page) {
     return await page.frameLocator(SEL_FEE).locator('body').evaluate(extractData);
   } catch {}
 
-  // 방법 2: frame.evaluate
+  // 방법 2: 모든 frame 순회
   for (const f of page.frames()) {
-    if (!f.url().includes('occp_010')) continue;
-    try { return await f.evaluate(extractData); } catch {}
+    if (f === page.mainFrame()) continue;
+    try {
+      const d = await f.evaluate(extractData);
+      if (Object.keys(d).length > 0) return d;
+    } catch {}
   }
 
   return {};
