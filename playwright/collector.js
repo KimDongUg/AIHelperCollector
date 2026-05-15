@@ -44,14 +44,14 @@ async function runCollect(onProgress) {
 
     // 2단계: 관리비조회 동호 목록 읽기
     onProgress({ current: 0, total: 0, unit: '② 관리비조회 목록 읽는 중...' });
-    const feeUnits = await readFeeUnitList(page);
+    const feeResult = await readFeeUnitList(page);
+    const feeUnits = Array.isArray(feeResult) ? feeResult : [];
+    const feeDiag  = (!Array.isArray(feeResult) && feeResult?.__diag) ? feeResult.__diag : '';
 
     if (!feeUnits.length) {
-      // 프레임 목록을 진단 정보로 포함
-      const frameUrls = page.frames().map(f => f.url().split('/').pop()).join(', ');
       return {
         ok: false,
-        error: `관리비조회 동호내역이 없습니다.\nXpERP에서 관리비조회 → 조회 버튼을 먼저 클릭해주세요.\n[프레임: ${frameUrls}]`,
+        error: `관리비조회 동호내역이 없습니다.\nXpERP에서 관리비조회 → 조회 버튼을 먼저 클릭해주세요.\n[진단: ${feeDiag}]`,
       };
     }
 
@@ -159,10 +159,31 @@ async function readFeeUnitList(page) {
     if (units.length) return units;
   } catch {}
 
-  // 방법 2: URL 필터 없이 모든 frame 순회
+  // 방법 2: URL 필터 없이 모든 frame 순회 (오류 진단 포함)
+  const diagLines = [];
   for (const f of page.frames()) {
     if (f === page.mainFrame()) continue;
+    const url = f.url();
+    if (url === 'about:blank' || url === 'about:srcdoc') continue;
+    const urlShort = url.split('/').pop().substring(0, 30);
     try {
+      const diag = await f.evaluate(() => {
+        try {
+          const tables = Array.from(document.querySelectorAll('table'));
+          const firstCells = [];
+          for (const t of tables) {
+            for (const td of t.querySelectorAll('td')) {
+              const txt = (td.innerText || '').trim();
+              if (txt) { firstCells.push(txt.substring(0, 15)); }
+              if (firstCells.length >= 3) break;
+            }
+            if (firstCells.length >= 3) break;
+          }
+          return { tables: tables.length, cells: firstCells };
+        } catch (e) { return { innerErr: e.message }; }
+      });
+      diagLines.push(`[${urlShort}:T${diag.tables}:${JSON.stringify(diag.cells || [])}]`);
+      // 동호 패턴 탐색
       const units = await f.evaluate(() => {
         const result = [];
         for (const table of document.querySelectorAll('table')) {
@@ -181,10 +202,13 @@ async function readFeeUnitList(page) {
         return result;
       });
       if (units.length) return units;
-    } catch {}
+    } catch (e) {
+      diagLines.push(`[${urlShort}:ERR:${e.message.substring(0, 40)}]`);
+    }
   }
 
-  return [];
+  // 동호 미발견 시 진단 정보와 함께 빈 배열 반환
+  return { __diag: diagLines.join(' ') };
 }
 
 /* ═══════════════════════════════════════════════════════════
