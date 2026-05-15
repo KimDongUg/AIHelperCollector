@@ -1,15 +1,9 @@
 /**
- * XpERP 자동 수집기 메인 모듈
+ * XpERP 수집기 — 두 경로 방식
  *
- * [수집 전략]
- * 1. 소유주변동처리 메뉴 → 전체 목록 조회 → 세대 목록(동/호) 추출
- * 2. 각 세대 클릭 → 관리비조회 탭 → 관리비 수집
- * 3. 입주등록 탭 → 세대주/입주자 수집
- * 4. 엑셀 생성
- *
- * [selector 안내]
- * 실제 ERP HTML에 맞게 아래 SELECTORS 객체를 수정하세요.
- * F12 → Elements 탭에서 확인 후 적용.
+ * 경로 1. 입주자 > 입주자현황  →  동 / 호 / 휴대폰
+ * 경로 2. 부과 > 관리비조회   →  동호내역 목록 순회
+ *          └─ 고지내역 / 검침내역 / 할인내역 / 항목별 부과내역
  */
 
 const path = require('path');
@@ -19,121 +13,68 @@ const { exportExcel } = require('./exportExcel');
 const { saveErrorLog } = require('./logger');
 
 let stopFlag = false;
+function stopCollect() { stopFlag = true; }
 
-const SELECTORS = {
-  // 왼쪽 메뉴: 입주자 > 입주처리
-  menuResident: '입주자',
-  menuResidentProcess: '입주처리',
-  menuOwnerChange: '소유주변동처리',
-  menuMoveIn: '입주등록',
-
-  // 소유주변동처리 화면 - 조회 버튼
-  btnSearch: '조회',
-
-  // 세대 목록 테이블 행 (동/호 포함)
-  // XpERP 기준: 테이블 tbody > tr
-  unitTableRow: 'table tbody tr',
-
-  // 동, 호 셀 인덱스 (0-based)
-  colDong: 1,
-  colHo: 2,
-  colOwnerName: 5,
-  colOwnerPhone: 8,
-  colResidentName: 10,
-  colResidentStatus: 11,
-
-  // 관리비조회 탭
-  tabFee: '관리비조회',
-
-  // 입주등록 탭
-  tabMoveIn: '입주등록',
-
-  // 관리비조회 화면 - 항목별 selector
-  // '총관내역' 테이블 기준 — 실제 ERP에서 F12로 확인 후 수정 필요
-  fee: {
-    // 세대 선택 후 관리비 테이블에서 현재 선택 세대 행
-    selectedRow: 'tr.selected, tr.active, tr[class*="select"]',
-    totalCharge: '[id*="total"], .totalAmt, td:nth-child(5)',
-    prevUnpaid: '[id*="prev"], .prevUnpaid',
-    electric: '[id*="elec"], .electric',
-    water: '[id*="water"], .water',
-    heat: '[id*="heat"], .heat',
-    generalMgmt: '[id*="general"], .general',
-    clean: '[id*="clean"], .clean',
-    repair: '[id*="repair"], .repair',
-    discount: '[id*="discount"], .discount',
-    finalPay: '[id*="final"], .finalAmt',
-    unpaid: '[id*="unpaid"], .unpaid',
-  },
-
-  // 입주등록 화면 - 세대주 섹션
-  resident: {
-    ownerName: 'input[id*="ownerNm"], input[name*="ownerNm"], .ownerName input',
-    ownerPhone: 'input[id*="ownerHp"], input[name*="ownerHp"], input[id*="handphone"]',
-    residentName: 'input[id*="resNm"], input[name*="resNm"]',
-    residentPhone: 'input[id*="resHp"], input[name*="resHp"]',
-    moveInDate: 'input[id*="moveInDt"], input[name*="moveInDt"]',
-    memo: 'input[id*="memo"], textarea[id*="memo"]',
-  },
-};
-
-function stopCollect() {
-  stopFlag = true;
-}
-
+/* ═══════════════════════════════════════════════════════════
+ *  MAIN
+ * ═══════════════════════════════════════════════════════════ */
 async function runCollect(onProgress) {
   stopFlag = false;
   const page = await getPage();
   const outputDir = path.join(__dirname, '..', 'output');
-  const logsDir = path.join(__dirname, '..', 'logs');
+  const logsDir  = path.join(__dirname, '..', 'logs');
   if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir, { recursive: true });
+  if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
 
-  const allData = [];
+  const allData     = [];
   const failedUnits = [];
 
   try {
-    // 1. 소유주변동처리 메뉴 접근 → 전체 세대 목록 가져오기
-    const units = await fetchUnitList(page);
-    if (!units || units.length === 0) {
-      return { ok: false, error: '세대 목록을 가져올 수 없습니다. ERP 화면을 확인해주세요.' };
+    // 1단계: 입주자현황 → 동-호 → 휴대폰 맵
+    onProgress({ current: 0, total: 0, unit: '① 입주자현황 조회 중...' });
+    const residentMap = await fetchResidentMap(page);
+
+    // 2단계: 관리비조회 → 동호내역 목록
+    onProgress({ current: 0, total: 0, unit: '② 관리비조회 목록 로딩 중...' });
+    const feeUnits = await fetchFeeUnits(page);
+
+    if (!feeUnits.length) {
+      return { ok: false, error: '관리비조회 동호내역이 없습니다. 조회 결과를 확인하세요.' };
     }
 
-    const total = units.length;
-    onProgress({ current: 0, total, unit: '세대 목록 로딩 완료' });
+    const total = feeUnits.length;
+    onProgress({ current: 0, total, unit: '수집 시작' });
 
-    // 2. 각 세대 순회
-    for (let i = 0; i < units.length; i++) {
+    // 3단계: 각 호 클릭 → 데이터 수집
+    for (let i = 0; i < feeUnits.length; i++) {
       if (stopFlag) break;
-
-      const unit = units[i];
-      const unitLabel = `${unit.dong}동 ${unit.ho}호`;
-      onProgress({ current: i + 1, total, unit: unitLabel });
+      const unit = feeUnits[i];
+      onProgress({ current: i + 1, total, unit: unit.dongho });
 
       try {
-        const feeData = await collectFeeForUnit(page, unit);
-        const residentData = await collectResidentForUnit(page, unit);
-        allData.push({ ...unit, ...feeData, ...residentData });
+        await clickFeeUnit(page, unit._rowIndex);
+        await page.waitForTimeout(500);
+
+        const feeData = await collectUnitFeeData(page);
+        const phone   = residentMap[`${unit.dong}-${unit.ho}`] || '';
+
+        allData.push({ dong: unit.dong, ho: unit.ho, phone, ...feeData });
       } catch (err) {
-        failedUnits.push(unitLabel);
-        saveErrorLog(logsDir, unitLabel, err.message);
+        failedUnits.push(unit.dongho);
+        saveErrorLog(logsDir, unit.dongho, err.message);
       }
 
-      // 세대 간 최소 간격
       await page.waitForTimeout(100);
     }
 
-    if (allData.length === 0) {
+    if (!allData.length) {
       return { ok: false, error: '수집된 데이터가 없습니다.' };
     }
 
-    // 3. 엑셀 생성
     const filePath = await exportExcel(allData, outputDir);
-
     onProgress({ current: total, total, done: true });
-
     return {
-      ok: true,
-      filePath,
+      ok: true, filePath,
       total: allData.length,
       failed: failedUnits.length,
       failedUnits,
@@ -143,170 +84,236 @@ async function runCollect(onProgress) {
   }
 }
 
-/**
- * 소유주변동처리 화면에서 전체 세대 목록 추출
- * XpERP: 왼쪽 메뉴 입주자 > 소유주변동처리 > 조회
- */
-async function fetchUnitList(page) {
-  // 왼쪽 사이드 메뉴 클릭: 입주자
-  await clickMenuByText(page, SELECTORS.menuResident);
-  await page.waitForTimeout(500);
-
-  // 소유주변동처리 클릭
-  await clickMenuByText(page, SELECTORS.menuOwnerChange);
+/* ═══════════════════════════════════════════════════════════
+ *  입주자현황: 동/호 → 휴대폰 맵
+ * ═══════════════════════════════════════════════════════════ */
+async function fetchResidentMap(page) {
+  await clickMenuByText(page, '입주자');
+  await page.waitForTimeout(400);
+  await clickMenuByText(page, '입주자현황');
   await page.waitForTimeout(1000);
 
-  // 조회 버튼 클릭 → 테이블에 행이 나타날 때까지 대기 (최대 15초)
-  await clickButtonByText(page, SELECTORS.btnSearch);
-  const frame0 = await getFrame(page);
-  const target0 = frame0 || page;
+  const frame  = await getFrame(page);
+  const target = frame || page;
+
+  // 개인정보 표시 체크박스 활성화
+  await checkPersonalInfoBox(target);
+
+  // 조회
+  await clickButtonByText(page, '조회');
   try {
-    await target0.waitForSelector('table tbody tr, tr.jqgrow, tbody tr', { timeout: 15000 });
+    await target.waitForSelector('table tbody tr', { timeout: 10000 });
   } catch {
-    await page.waitForTimeout(4000); // fallback
+    await page.waitForTimeout(3000);
   }
 
-  // iframe 대응
-  const frame = await getFrame(page);
-  const target = frame || page;
+  // 테이블 파싱 — 동 컬럼은 rowspan으로 병합되어 있음
+  return await target.evaluate(() => {
+    const map  = {};
+    const rows = document.querySelectorAll('table tbody tr');
+    let lastDong = '';
 
-  // 테이블 행 파싱 — 여러 셀렉터 시도
-  let rows = await target.$$(SELECTORS.unitTableRow);
-  if (rows.length === 0) rows = await target.$$('tr.jqgrow');
-  if (rows.length === 0) rows = await target.$$('tbody tr');
-  if (rows.length === 0) {
-    const allTr = await target.$$('tr');
-    throw new Error(`세대 목록 없음 (table tbody tr: 0개, 전체 tr: ${allTr.length}개). XpERP 화면에서 조회 결과가 표시되는지 확인하세요.`);
-  }
+    for (const row of rows) {
+      const tds = Array.from(row.querySelectorAll('td'));
+      if (!tds.length) continue;
 
-  const units = [];
+      let dong, ho, phone;
 
-  for (const row of rows) {
-    const cells = await row.$$('td');
-    if (cells.length < 3) continue;
+      // 동 컬럼 포함 여부: 전체 열 수로 판단
+      // 헤더: 동(0) 호(1) 입주자(2) 생년월일(3) 소유주(4) 입주일(5)
+      //       분양(6) 입주구분(7) 집전화(8) 휴대폰(9) ... (총 18열)
+      if (tds.length >= 10) {
+        // 동 컬럼 있음
+        dong = tds[0].innerText.trim();
+        if (dong && dong !== '합계') lastDong = dong;
+        ho    = tds[1].innerText.trim();
+        phone = tds[9].innerText.trim();
+      } else if (tds.length >= 9) {
+        // 동 컬럼 병합(없음) → 인덱스 -1 shift
+        dong  = lastDong;
+        ho    = tds[0].innerText.trim();
+        phone = tds[8].innerText.trim();
+      } else {
+        continue;
+      }
 
-    const dong = (await cells[SELECTORS.colDong]?.innerText() || '').trim();
-    const ho = (await cells[SELECTORS.colHo]?.innerText() || '').trim();
-    if (!dong || !ho) continue;
-    // 합계 행 제외
-    if (dong === '합계' || ho === '합계' || dong.includes('합계')) continue;
-
-    const ownerName = cells[SELECTORS.colOwnerName]
-      ? (await cells[SELECTORS.colOwnerName].innerText()).trim()
-      : '';
-    const ownerPhone = cells[SELECTORS.colOwnerPhone]
-      ? (await cells[SELECTORS.colOwnerPhone].innerText()).trim()
-      : '';
-
-    // _row 대신 인덱스 저장 (스테일 핸들 방지)
-    units.push({ dong, ho, ownerName, ownerPhone, _rowIndex: units.length });
-  }
-
-  return units;
-}
-
-/**
- * 관리비조회 탭에서 해당 세대의 관리비 데이터 수집
- */
-async function collectFeeForUnit(page, unit) {
-  // 인덱스로 행 재조회 후 클릭 (스테일 핸들 방지)
-  if (unit._rowIndex !== undefined) {
-    const frame = await getFrame(page);
-    const target = frame || page;
-    let rows = await target.$$(SELECTORS.unitTableRow);
-    if (rows.length === 0) rows = await target.$$('tr.jqgrow');
-    if (rows.length === 0) rows = await target.$$('tbody tr');
-    const row = rows[unit._rowIndex];
-    if (row) await row.evaluate((el) => el.click());
-    await page.waitForTimeout(300);
-  }
-
-  await clickTabByText(page, SELECTORS.tabFee);
-  await page.waitForTimeout(400);
-
-  const frame = await getFrame(page);
-  const target = frame || page;
-
-  const extract = async (selector) => {
-    try {
-      const el = await target.$(selector);
-      if (!el) return '';
-      const text = (await el.innerText()).trim();
-      return text.replace(/,/g, '').replace(/[^0-9\-]/g, '') || text;
-    } catch {
-      return '';
+      if (!ho || ho === '합계') continue;
+      map[`${lastDong}-${ho}`] = phone;
     }
-  };
-
-  return {
-    totalCharge: await extract(SELECTORS.fee.totalCharge),
-    prevUnpaid: await extract(SELECTORS.fee.prevUnpaid),
-    electric: await extract(SELECTORS.fee.electric),
-    water: await extract(SELECTORS.fee.water),
-    heat: await extract(SELECTORS.fee.heat),
-    generalMgmt: await extract(SELECTORS.fee.generalMgmt),
-    clean: await extract(SELECTORS.fee.clean),
-    repair: await extract(SELECTORS.fee.repair),
-    discount: await extract(SELECTORS.fee.discount),
-    finalPay: await extract(SELECTORS.fee.finalPay),
-    unpaid: await extract(SELECTORS.fee.unpaid),
-  };
+    return map;
+  });
 }
 
-/**
- * 입주등록 탭에서 세대주/입주자 정보 수집
- */
-async function collectResidentForUnit(page, unit) {
-  await clickTabByText(page, SELECTORS.tabMoveIn);
+/* ═══════════════════════════════════════════════════════════
+ *  관리비조회: 동호 목록 취득
+ * ═══════════════════════════════════════════════════════════ */
+async function fetchFeeUnits(page) {
+  await clickMenuByText(page, '부과');
   await page.waitForTimeout(400);
+  await clickMenuByText(page, '관리비조회');
+  await page.waitForTimeout(1000);
 
-  const frame = await getFrame(page);
+  const frame  = await getFrame(page);
   const target = frame || page;
 
-  const extractInput = async (selector) => {
-    try {
-      const el = await target.$(selector);
-      if (!el) return '';
-      const tag = await el.evaluate((n) => n.tagName.toLowerCase());
-      if (tag === 'input' || tag === 'textarea') return (await el.inputValue()).trim();
-      return (await el.innerText()).trim();
-    } catch {
-      return '';
-    }
-  };
+  await checkPersonalInfoBox(target);
 
-  return {
-    residentOwnerName: await extractInput(SELECTORS.resident.ownerName),
-    residentOwnerPhone: await extractInput(SELECTORS.resident.ownerPhone),
-    residentName: await extractInput(SELECTORS.resident.residentName),
-    residentPhone: await extractInput(SELECTORS.resident.residentPhone),
-    moveInDate: await extractInput(SELECTORS.resident.moveInDate),
-    memo: await extractInput(SELECTORS.resident.memo),
-  };
+  // 조회
+  await clickButtonByText(page, '조회');
+  try {
+    await target.waitForSelector('table tbody tr', { timeout: 15000 });
+  } catch {
+    await page.waitForTimeout(4000);
+  }
+
+  // 동호내역(첫 번째 테이블)에서 목록 파싱
+  return await target.evaluate(() => {
+    const result = [];
+    const table  = document.querySelector('table');
+    if (!table) return result;
+
+    const rows = Array.from(table.querySelectorAll('tbody tr'));
+    rows.forEach((row, idx) => {
+      const tds    = Array.from(row.querySelectorAll('td'));
+      if (!tds.length) return;
+
+      const dongho = tds[0].innerText.trim();
+      // "1 - 101" 또는 "1-101" 형식
+      const match = dongho.match(/^(\d+)\s*-\s*(\d+)$/);
+      if (!match) return;
+
+      result.push({
+        dongho,
+        dong: match[1],
+        ho:   match[2],
+        _rowIndex: idx,
+      });
+    });
+    return result;
+  });
 }
 
-// ── helpers ───────────────────────────────────────────────
+/* ═══════════════════════════════════════════════════════════
+ *  관리비조회: 특정 호 클릭
+ * ═══════════════════════════════════════════════════════════ */
+async function clickFeeUnit(page, rowIndex) {
+  const frame  = await getFrame(page);
+  const target = frame || page;
+  const rows   = await target.$$('table tbody tr');
+  if (rows[rowIndex]) await rows[rowIndex].evaluate(el => el.click());
+}
+
+/* ═══════════════════════════════════════════════════════════
+ *  관리비조회: 선택된 호의 모든 데이터 수집
+ *  (고지내역 / 검침내역 / 할인내역 / 항목별 부과내역)
+ * ═══════════════════════════════════════════════════════════ */
+async function collectUnitFeeData(page) {
+  const frame  = await getFrame(page);
+  const target = frame || page;
+
+  return await target.evaluate(() => {
+    const data = {};
+
+    // 첫 번째 테이블(동호내역)을 제외한 모든 테이블에서 데이터 수집
+    const tables = Array.from(document.querySelectorAll('table')).slice(1);
+
+    // 각 테이블에서 섹션 제목 찾기 (테이블 위 또는 테이블 내 th로 표시)
+    tables.forEach((table) => {
+      // 섹션 이름: 테이블 직전 요소의 텍스트에서 추출
+      let sectionName = '';
+      let prev = table.previousElementSibling;
+      while (prev) {
+        const t = prev.innerText ? prev.innerText.trim() : '';
+        if (t && !t.startsWith('부과항목계') && t.length < 30) {
+          sectionName = t.replace(/[•\s]/g, '');
+          break;
+        }
+        prev = prev.previousElementSibling;
+      }
+
+      const rows = Array.from(table.querySelectorAll('tr'));
+
+      // 헤더 행 감지 (th가 있는 첫 행)
+      let headers = [];
+      const firstRow = rows[0];
+      if (firstRow) {
+        headers = Array.from(firstRow.querySelectorAll('th, td'))
+          .map(h => h.innerText.trim());
+      }
+
+      // 검침내역: 검침항목/전월지침/당월지침/사용량(요금) 패턴
+      const isMeter = headers.some(h => h.includes('전월') || h.includes('당월지침'));
+
+      rows.forEach(row => {
+        const cells = Array.from(row.querySelectorAll('td'));
+        if (!cells.length) return;
+
+        if (isMeter) {
+          // 검침: 첫 번째 셀=항목명, 나머지=전월/당월/요금
+          const item = cells[0]?.innerText.trim();
+          if (!item || item === '검침항목' || item === '항목') return;
+          const prefix = `검침_${item}`;
+          if (cells[1]) data[`${prefix}_전월`] = cells[1].innerText.trim().replace(/,/g, '');
+          if (cells[2]) data[`${prefix}_당월`] = cells[2].innerText.trim().replace(/,/g, '');
+          if (cells[3]) data[`${prefix}_요금`] = cells[3].innerText.trim().replace(/,/g, '');
+        } else {
+          // 일반: (항목명/금액) 쌍 반복
+          for (let i = 0; i + 1 < cells.length; i += 2) {
+            const key = cells[i].innerText.trim();
+            const val = cells[i + 1].innerText.trim().replace(/,/g, '');
+            if (!key || ['항목', '항목명', '순번', '할인항목명'].includes(key)) continue;
+            if (key.startsWith('•') || key === '') continue;
+            // 키 중복 방지: 이미 있으면 섹션명 접두어 추가
+            const finalKey = data[key] !== undefined ? `${sectionName}_${key}` : key;
+            data[finalKey] = val;
+          }
+        }
+      });
+    });
+
+    // 항목별 부과내역 요약 숫자(input readonly)도 수집
+    document.querySelectorAll('input[readonly], input[disabled]').forEach(inp => {
+      const label = inp.previousSibling?.textContent?.trim()
+        || inp.parentElement?.previousElementSibling?.innerText?.trim();
+      const val = inp.value?.replace(/,/g, '');
+      if (label && val) data[`요약_${label}`] = val;
+    });
+
+    return data;
+  });
+}
+
+/* ═══════════════════════════════════════════════════════════
+ *  helpers
+ * ═══════════════════════════════════════════════════════════ */
+async function checkPersonalInfoBox(target) {
+  try {
+    // "개인정보 표시" 체크박스 활성화
+    const cb = await target.$('input[type="checkbox"]');
+    if (cb && !(await cb.isChecked())) {
+      await cb.evaluate(el => el.click());
+      await new Promise(r => setTimeout(r, 200));
+    }
+  } catch {}
+}
 
 async function clickMenuByText(page, text) {
   try {
     const el = await page.locator(`text="${text}"`).first();
     await el.click({ timeout: 5000 });
     await page.waitForTimeout(300);
-  } catch {
-    // 메뉴가 없거나 이미 열려있을 수 있음
-  }
+  } catch {}
 }
 
 async function clickButtonByText(page, text) {
-  const frame = await getFrame(page);
+  const frame  = await getFrame(page);
   const target = frame || page;
 
-  // XpERP 알려진 버튼 ID 매핑
   const knownIds = { '조회': '#BTN_INQUIRY' };
   if (knownIds[text]) {
     try {
       const el = target.locator(knownIds[text]).first();
-      await el.evaluate((node) => node.click()); // JS 클릭 — 뷰포트 밖 요소도 처리
+      await el.evaluate(node => node.click());
       return;
     } catch {}
   }
@@ -314,34 +321,18 @@ async function clickButtonByText(page, text) {
   const btn = target.locator(
     `button:text-is("${text}"), input[value="${text}"], a:text-is("${text}")`
   ).first();
-  // JS 클릭으로 뷰포트 제한 우회
-  await btn.evaluate((node) => node.click());
-}
-
-async function clickTabByText(page, text) {
-  const frame = await getFrame(page);
-  const target = frame || page;
-  try {
-    // :text-is() = 정확 일치 CSS 의사클래스
-    const tab = await target.locator(`:text-is("${text}")`).first();
-    await tab.click({ timeout: 5000 });
-    await page.waitForTimeout(300);
-  } catch {
-    // 탭 클릭 실패 시 무시하고 계속
-  }
+  await btn.evaluate(node => node.click());
 }
 
 async function getFrame(page) {
   try {
     const frames = page.frames();
-    // 1. 명칭으로 탐색
-    const named = frames.find(
-      (f) => f.name() === 'mainFrame' || f.name() === 'contentFrame' || f.name() === 'iframe'
+    const named  = frames.find(
+      f => f.name() === 'mainFrame' || f.name() === 'contentFrame' || f.name() === 'iframe'
     );
     if (named) return named;
-    // 2. 메인 프레임 외 컨텐츠 프레임 탐색 (XpERP 탭 영역)
     const content = frames.find(
-      (f) => f !== page.mainFrame() && f.url() && !f.url().startsWith('about:')
+      f => f !== page.mainFrame() && f.url() && !f.url().startsWith('about:')
     );
     return content || null;
   } catch {

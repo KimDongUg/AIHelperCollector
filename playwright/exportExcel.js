@@ -1,26 +1,11 @@
 const XLSX = require('xlsx');
 const path = require('path');
 
-const COLUMNS = [
-  { key: 'dong',              header: '동' },
-  { key: 'ho',               header: '호' },
-  { key: 'ownerName',        header: '소유주명' },
-  { key: 'ownerPhone',       header: '소유주 연락처' },
-  { key: 'residentName',     header: '입주자명' },
-  { key: 'residentPhone',    header: '입주자 연락처' },
-  { key: 'moveInDate',       header: '입주일' },
-  { key: 'totalCharge',      header: '당월부과합계' },
-  { key: 'prevUnpaid',       header: '전월미납금' },
-  { key: 'electric',         header: '전기료' },
-  { key: 'water',            header: '수도료' },
-  { key: 'heat',             header: '난방비' },
-  { key: 'generalMgmt',      header: '일반관리비' },
-  { key: 'clean',            header: '청소비' },
-  { key: 'repair',           header: '수선유지비' },
-  { key: 'discount',         header: '할인금액' },
-  { key: 'finalPay',         header: '최종납부금액' },
-  { key: 'unpaid',           header: '미납여부' },
-  { key: 'memo',             header: '메모' },
+// 고정 선두 컬럼
+const FIXED_COLS = [
+  { key: 'dong',  header: '동' },
+  { key: 'ho',    header: '호' },
+  { key: 'phone', header: '휴대폰' },
 ];
 
 function getYYYYMM() {
@@ -29,29 +14,47 @@ function getYYYYMM() {
 }
 
 async function exportExcel(data, outputDir) {
-  const rows = data.map((item) => {
-    const row = {};
-    for (const col of COLUMNS) {
-      row[col.header] = item[col.key] || '';
+  if (!data || !data.length) throw new Error('내보낼 데이터가 없습니다.');
+
+  // 동적 컬럼: 고정 컬럼 이후 모든 키 수집 (첫 데이터 행 기준)
+  const fixedKeys = new Set(FIXED_COLS.map(c => c.key));
+  const dynamicKeys = [];
+  const seen = new Set();
+  for (const row of data) {
+    for (const k of Object.keys(row)) {
+      if (!fixedKeys.has(k) && !seen.has(k)) {
+        dynamicKeys.push(k);
+        seen.add(k);
+      }
     }
-    return row;
+  }
+
+  const allHeaders = [
+    ...FIXED_COLS.map(c => c.header),
+    ...dynamicKeys,
+  ];
+
+  // 데이터 행 생성
+  const sheetData = data.map(row => {
+    const r = {};
+    for (const col of FIXED_COLS) r[col.header] = row[col.key] || '';
+    for (const key of dynamicKeys)  r[key]        = row[key]    || '';
+    return r;
   });
 
-  const ws = XLSX.utils.json_to_sheet(rows, {
-    header: COLUMNS.map((c) => c.header),
-  });
+  const ws = XLSX.utils.json_to_sheet(sheetData, { header: allHeaders });
 
-  // 컬럼 너비 설정
-  ws['!cols'] = COLUMNS.map((c) => ({ wch: Math.max(c.header.length * 2, 12) }));
+  // 컬럼 너비
+  ws['!cols'] = allHeaders.map(h => ({ wch: Math.max(h.length * 2, 10) }));
 
-  // 헤더 스타일 (배경색)
-  const range = XLSX.utils.decode_range(ws['!ref']);
+  // 헤더 행 스타일
+  const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
   for (let C = range.s.c; C <= range.e.c; C++) {
     const cell = ws[XLSX.utils.encode_cell({ r: 0, c: C })];
     if (cell) {
       cell.s = {
-        font: { bold: true, color: { rgb: 'FFFFFF' } },
-        fill: { fgColor: { rgb: '1565C0' } },
+        font:      { bold: true, color: { rgb: 'FFFFFF' } },
+        fill:      { fgColor: { rgb: '1565C0' } },
         alignment: { horizontal: 'center' },
       };
     }
@@ -61,7 +64,7 @@ async function exportExcel(data, outputDir) {
   XLSX.utils.book_append_sheet(wb, ws, '관리비');
 
   const filename = `관리비데이터_${getYYYYMM()}.xlsx`;
-  const filePath = require('path').join(outputDir, filename);
+  const filePath = path.join(outputDir, filename);
   XLSX.writeFile(wb, filePath);
   return filePath;
 }
