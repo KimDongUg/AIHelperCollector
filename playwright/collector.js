@@ -200,31 +200,37 @@ async function readFeeUnitList(page) {
         } catch (e) { return { innerErr: e.message }; }
       });
       diagLines.push(`[${urlShort}:T${diag.tables}:${JSON.stringify(diag.cells || [])}]`);
-      // 동호 패턴 탐색
+      // 동호 패턴 탐색 — 모든 테이블 중 최대 결과 선택
       const units = await f.evaluate(() => {
         function firstVal(el) {
           const raw = (el?.innerText || el?.textContent || '').trim();
           return (raw.split(/[\t\n]/)[0] || '').replace(/\s+/g, '').trim();
         }
-        const result = [];
-        for (const table of document.querySelectorAll('table')) {
-          Array.from(table.querySelectorAll('tbody tr, tr')).forEach((row, idx) => {
+        function parseTable(table) {
+          const rows = [];
+          Array.from(table.querySelectorAll('tbody tr, tr')).forEach((row) => {
             const tds = Array.from(row.querySelectorAll('td'));
             if (!tds.length) return;
             const c0 = firstVal(tds[0]);
             const m1 = c0.match(/^(\d+)[-–—](\d+)$/);
-            if (m1) { result.push({ dongho: `${m1[1]}-${m1[2]}`, dong: m1[1], ho: m1[2], _rowIndex: idx }); return; }
+            if (m1) { rows.push({ dongho: `${m1[1]}-${m1[2]}`, dong: m1[1], ho: m1[2] }); return; }
             for (let ci = 0; ci < Math.min(tds.length - 1, 4); ci++) {
               const ca = firstVal(tds[ci]);
               const cb = firstVal(tds[ci + 1]);
               if (/^\d{1,4}$/.test(ca) && /^\d{2,4}$/.test(cb)) {
-                result.push({ dongho: `${ca}-${cb}`, dong: ca, ho: cb, _rowIndex: idx }); return;
+                rows.push({ dongho: `${ca}-${cb}`, dong: ca, ho: cb }); return;
               }
             }
           });
-          if (result.length) break;
+          return rows;
         }
-        return result;
+        let best = [];
+        for (const table of document.querySelectorAll('table')) {
+          const rows = parseTable(table);
+          if (rows.length > best.length) best = rows;
+        }
+        const seen = new Set();
+        return best.filter(u => { if (seen.has(u.dongho)) return false; seen.add(u.dongho); return true; });
       });
       if (units.length) return units;
     } catch (e) {
