@@ -279,11 +279,22 @@ async function clickMenuByText(page, text) {
 async function clickButtonByText(page, text) {
   const frame = await getFrame(page);
   const target = frame || page;
-  // :text-is() = 정확히 일치 (has-text는 부분 일치라 "중간정산서조회" 등 오매칭 발생)
-  const btn = await target.locator(
+
+  // XpERP 알려진 버튼 ID 매핑
+  const knownIds = { '조회': '#BTN_INQUIRY' };
+  if (knownIds[text]) {
+    try {
+      const el = target.locator(knownIds[text]).first();
+      await el.evaluate((node) => node.click()); // JS 클릭 — 뷰포트 밖 요소도 처리
+      return;
+    } catch {}
+  }
+
+  const btn = target.locator(
     `button:text-is("${text}"), input[value="${text}"], a:text-is("${text}")`
   ).first();
-  await btn.click({ timeout: 5000 });
+  // JS 클릭으로 뷰포트 제한 우회
+  await btn.evaluate((node) => node.click());
 }
 
 async function clickTabByText(page, text) {
