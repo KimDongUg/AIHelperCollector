@@ -153,8 +153,13 @@ async function fetchFeeUnits(page) {
   await clickMenuByText(page, '관리비조회');
   await page.waitForTimeout(2000);
 
-  // 관리비조회 frame 탐지 — 키워드로 올바른 탭 frame 찾기
-  _feeFrame = (await findFrameByKeyword(page, ['동호내역', '부과년월', '고지내역'])) || page;
+  // 관리비조회 frame 탐지 — 최대 3회 재시도
+  for (let i = 0; i < 3; i++) {
+    _feeFrame = await findFrameByKeyword(page, ['동호내역', '부과년월', '고지내역']);
+    if (_feeFrame) break;
+    await page.waitForTimeout(1000);
+  }
+  if (!_feeFrame) _feeFrame = page;
 
   await checkPersonalInfoBox(_feeFrame);
   await clickSearchButton(_feeFrame);
@@ -358,19 +363,31 @@ async function clickMenuByText(page, text) {
 
 /** 단일 frame 내에서 조회 버튼 클릭 */
 async function clickSearchButton(target) {
-  const selectors = [
-    '#BTN_INQUIRY',
-    'a:has-text("조회")',
-    'button:has-text("조회")',
-    'input[value="조회"]',
-  ];
-  for (const sel of selectors) {
-    try {
-      const el = target.locator(sel).first();
-      await el.evaluate(node => node.click());
-      return;
-    } catch {}
-  }
+  // 1) ID로 찾기
+  try {
+    const el = target.locator('#BTN_INQUIRY').first();
+    if (await el.count() > 0) { await el.evaluate(n => n.click()); return; }
+  } catch {}
+
+  // 2) JS 직접 실행 — XpERP 내부 함수 호출 또는 BTN_INQUIRY.click()
+  try {
+    await target.evaluate(() => {
+      const btn = document.getElementById('BTN_INQUIRY')
+        || document.querySelector('a.basic_btn[class*="blue"]')
+        || document.querySelector('a.btn_blue');
+      if (btn) { btn.click(); return; }
+      if (typeof doCommonSubmit === 'function') doCommonSubmit('inquiry');
+      else if (typeof fnSearch === 'function') fnSearch();
+      else if (typeof fn_search === 'function') fn_search();
+    });
+    return;
+  } catch {}
+
+  // 3) 클래스 기반 (메뉴 링크 제외)
+  try {
+    const el = target.locator('a.basic_btn, a.btn_blue').first();
+    if (await el.count() > 0) { await el.evaluate(n => n.click()); return; }
+  } catch {}
 }
 
 async function getFrame(page) {
