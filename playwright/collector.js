@@ -149,37 +149,66 @@ async function fetchResidentMap(page) {
  * ═══════════════════════════════════════════════════════════ */
 async function fetchFeeUnits(page) {
   await clickMenuByText(page, '부과');
-  await page.waitForTimeout(400);
+  await page.waitForTimeout(600);
   await clickMenuByText(page, '관리비조회');
-  await page.waitForTimeout(1000);
+  await page.waitForTimeout(2000); // 관리비조회 페이지 완전 로딩 대기
 
   const frame  = await getFrame(page);
   const target = frame || page;
 
   await checkPersonalInfoBox(target);
 
-  // 조회
-  await clickButtonByText(page, '조회');
+  // 조회 버튼 클릭 — 여러 방식 순차 시도
+  let clicked = false;
+  // 1) #BTN_INQUIRY ID
   try {
-    await target.waitForSelector('table tbody tr', { timeout: 15000 });
+    await (frame || page).locator('#BTN_INQUIRY').first().evaluate(el => el.click());
+    clicked = true;
+  } catch {}
+  // 2) 조회 텍스트로 찾기
+  if (!clicked) {
+    try {
+      await (frame || page).locator(':text-is("조회")').first().evaluate(el => el.click());
+      clicked = true;
+    } catch {}
+  }
+  // 3) a 태그 href 패턴
+  if (!clicked) {
+    try {
+      await (frame || page).locator('a[onclick*="inquiry"], a[onclick*="Inquiry"], a[onclick*="search"]').first().evaluate(el => el.click());
+    } catch {}
+  }
+
+  // 데이터 로딩 대기 (최대 20초)
+  try {
+    await target.waitForSelector('table tbody tr', { timeout: 20000 });
   } catch {
-    await page.waitForTimeout(4000);
+    await page.waitForTimeout(5000);
   }
 
   // 동호내역(첫 번째 테이블)에서 목록 파싱
   return await target.evaluate(() => {
     const result = [];
-    const table  = document.querySelector('table');
-    if (!table) return result;
+    // 동호내역 테이블: "1 - 101" 형식 행이 포함된 테이블 찾기
+    const allTables = Array.from(document.querySelectorAll('table'));
+    let donghoTable = null;
+    for (const t of allTables) {
+      const rows = Array.from(t.querySelectorAll('tr'));
+      const hasDongho = rows.some(row => {
+        const text = row.querySelector('td')?.innerText?.trim() || '';
+        return /\d+\s*-\s*\d+/.test(text);
+      });
+      if (hasDongho) { donghoTable = t; break; }
+    }
+    if (!donghoTable) return result;
 
-    const rows = Array.from(table.querySelectorAll('tbody tr'));
+    const rows = Array.from(donghoTable.querySelectorAll('tbody tr'));
     rows.forEach((row, idx) => {
       const tds    = Array.from(row.querySelectorAll('td'));
       if (!tds.length) return;
 
       const dongho = tds[0].innerText.trim();
-      // "1 - 101" 또는 "1-101" 형식
-      const match = dongho.match(/^(\d+)\s*-\s*(\d+)$/);
+      const match  = dongho.match(/^(\d+)\s*-\s*(\d+)$/);
       if (!match) return;
 
       result.push({
