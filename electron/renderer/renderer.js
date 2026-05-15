@@ -1,6 +1,7 @@
 let lastExcelPath = null;
 let isCollecting = false;
 
+const erpUrlInput      = document.getElementById('erpUrl');
 const cdpPortInput     = document.getElementById('cdpPort');
 const btnOpenErpBrowser = document.getElementById('btnOpenErpBrowser');
 const btnConnectERP    = document.getElementById('btnConnectERP');
@@ -38,14 +39,20 @@ function hideConnectStatus() {
   connectStatus.textContent = '';
 }
 
-// ERP 열기 — Edge/Chrome을 remote-debugging 모드로 실행
+// ERP URL .env에서 로드
+window.api.getErpUrl().then((url) => {
+  if (url && erpUrlInput) erpUrlInput.value = url;
+});
+
+// ERP 열기 — Edge/Chrome을 remote-debugging 모드로 실행 (ERP URL로 바로 이동)
 btnOpenErpBrowser.addEventListener('click', async () => {
   const port = parseInt(cdpPortInput.value, 10) || 9222;
+  const erpUrl = erpUrlInput ? erpUrlInput.value.trim() : '';
   btnOpenErpBrowser.disabled = true;
   hideConnectStatus();
   setStatus('blue', 'ERP 브라우저 실행 중...');
 
-  const result = await window.api.openErpBrowser(port);
+  const result = await window.api.openErpBrowser(port, erpUrl);
 
   btnOpenErpBrowser.disabled = false;
 

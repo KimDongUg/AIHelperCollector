@@ -32,14 +32,19 @@ app.on('window-all-closed', () => {
   app.quit();
 });
 
-// ERP 브라우저 열기 (remote-debugging 모드로 Edge/Chrome 실행)
-ipcMain.handle('open-erp-browser', async (_e, port) => {
+// ERP URL 읽기
+ipcMain.handle('get-erp-url', () => process.env.ERP_URL || '');
+
+// ERP 브라우저 열기 (remote-debugging 모드로 Edge/Chrome 실행, ERP URL로 바로 이동)
+ipcMain.handle('open-erp-browser', async (_e, port, erpUrl) => {
   const cdpPort = port || 9222;
+  const url = erpUrl || process.env.ERP_URL || '';
+  const urlArg = url ? ` "${url}"` : '';
 
   return new Promise((resolve) => {
-    exec(`start msedge --remote-debugging-port=${cdpPort}`, { shell: true }, (err) => {
+    exec(`start msedge --remote-debugging-port=${cdpPort}${urlArg}`, { shell: true }, (err) => {
       if (!err) { resolve({ ok: true }); return; }
-      exec(`start chrome --remote-debugging-port=${cdpPort}`, { shell: true }, (err2) => {
+      exec(`start chrome --remote-debugging-port=${cdpPort}${urlArg}`, { shell: true }, (err2) => {
         if (!err2) { resolve({ ok: true }); return; }
         resolve({ ok: false, error: 'Edge 또는 Chrome이 설치되어 있지 않습니다.' });
       });
