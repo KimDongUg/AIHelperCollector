@@ -40,11 +40,14 @@ ipcMain.handle('open-erp-browser', async (_e, port, erpUrl) => {
   const cdpPort = port || 9222;
   const url = erpUrl || process.env.ERP_URL || '';
   const urlArg = url ? ` "${url}"` : '';
+  // --user-data-dir로 별도 프로필 생성 → 기존 Edge 실행 중이어도 CDP 포트가 적용된 새 인스턴스 강제 실행
+  const profileDir = `%TEMP%\\erp-cdp-profile`;
+  const flags = `--remote-debugging-port=${cdpPort} --user-data-dir="${profileDir}"`;
 
   return new Promise((resolve) => {
-    exec(`start msedge --remote-debugging-port=${cdpPort}${urlArg}`, { shell: true }, (err) => {
+    exec(`start msedge ${flags}${urlArg}`, { shell: true }, (err) => {
       if (!err) { resolve({ ok: true }); return; }
-      exec(`start chrome --remote-debugging-port=${cdpPort}${urlArg}`, { shell: true }, (err2) => {
+      exec(`start chrome ${flags}${urlArg}`, { shell: true }, (err2) => {
         if (!err2) { resolve({ ok: true }); return; }
         resolve({ ok: false, error: 'Edge 또는 Chrome이 설치되어 있지 않습니다.' });
       });
