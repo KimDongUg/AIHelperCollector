@@ -65,7 +65,7 @@ async function runCollect(onProgress) {
       onProgress({ current: i + 1, total, unit: unit.dongho });
 
       try {
-        await clickFeeUnit(page, unit._rowIndex);
+        await clickFeeUnit(page, unit.dong, unit.ho);
         await page.waitForTimeout(400);
 
         const feeData = await collectFeeData(page);
@@ -145,28 +145,33 @@ async function readFeeUnitList(page) {
         const raw = (el?.innerText || el?.textContent || '').trim();
         return (raw.split(/[\t\n]/)[0] || '').replace(/\s+/g, '').trim();
       }
-      const result = [];
-      for (const table of document.querySelectorAll('table')) {
-        Array.from(table.querySelectorAll('tbody tr, tr')).forEach((row, idx) => {
+      function parseTable(table) {
+        const rows = [];
+        Array.from(table.querySelectorAll('tbody tr, tr')).forEach((row) => {
           const tds = Array.from(row.querySelectorAll('td'));
           if (!tds.length) return;
-          // 전략1: 첫 셀 첫 값이 "N-N" 또는 "N" (동-호 합치거나 분리)
           const c0 = firstVal(tds[0]);
           const m1 = c0.match(/^(\d+)[-–—](\d+)$/);
-          if (m1) { result.push({ dongho: `${m1[1]}-${m1[2]}`, dong: m1[1], ho: m1[2], _rowIndex: idx }); return; }
-          // 전략2: 앞쪽 셀에서 동(숫자) + 다음 셀 호(숫자) 탐색
+          if (m1) { rows.push({ dongho: `${m1[1]}-${m1[2]}`, dong: m1[1], ho: m1[2] }); return; }
           for (let ci = 0; ci < Math.min(tds.length - 1, 4); ci++) {
             const ca = firstVal(tds[ci]);
             const cb = firstVal(tds[ci + 1]);
             if (/^\d{1,4}$/.test(ca) && /^\d{2,4}$/.test(cb)) {
-              result.push({ dongho: `${ca}-${cb}`, dong: ca, ho: cb, _rowIndex: idx });
-              return;
+              rows.push({ dongho: `${ca}-${cb}`, dong: ca, ho: cb }); return;
             }
           }
         });
-        if (result.length) break;
+        return rows;
       }
-      return result;
+      // 모든 테이블 수집 후 가장 큰 결과 선택 (동호내역 테이블)
+      let best = [];
+      for (const table of document.querySelectorAll('table')) {
+        const rows = parseTable(table);
+        if (rows.length > best.length) best = rows;
+      }
+      // 중복 제거 (동일 동호 중복 방지)
+      const seen = new Set();
+      return best.filter(u => { if (seen.has(u.dongho)) return false; seen.add(u.dongho); return true; });
     });
     if (units.length) return units;
   } catch {}
@@ -234,31 +239,48 @@ async function readFeeUnitList(page) {
 /* ═══════════════════════════════════════════════════════════
  *  관리비조회: 특정 호 행 클릭
  * ═══════════════════════════════════════════════════════════ */
-async function clickFeeUnit(page, rowIndex) {
-  // 방법 1: frameLocator
+async function clickFeeUnit(page, dong, ho) {
+  const target = `${dong}-${ho}`;
+
+  // 방법 1: frameLocator — 동-호 텍스트로 행 찾아 클릭
   try {
-    const fl  = page.frameLocator(SEL_FEE);
-    const rows = fl.locator('table tbody tr');
-    await rows.nth(rowIndex).click({ timeout: 3000 });
+    await page.frameLocator(SEL_FEE).locator('body').evaluate((t) => {
+      function firstVal(el) {
+        const raw = (el?.innerText || '').trim();
+        return (raw.split(/[\t\n]/)[0] || '').replace(/\s+/g, '').trim();
+      }
+      for (const table of document.querySelectorAll('table')) {
+        for (const row of table.querySelectorAll('tbody tr, tr')) {
+          const tds = Array.from(row.querySelectorAll('td'));
+          if (!tds.length) continue;
+          const c0 = firstVal(tds[0]);
+          if (c0 === t || c0.replace(/[-–—]/g, '-') === t) { row.click(); return; }
+          // 분리 셀: 동=tds[ci], 호=tds[ci+1]
+          for (let ci = 0; ci < Math.min(tds.length - 1, 4); ci++) {
+            if (firstVal(tds[ci]) === t.split('-')[0] && firstVal(tds[ci+1]) === t.split('-')[1]) {
+              row.click(); return;
+            }
+          }
+        }
+      }
+    }, target);
     return;
   } catch {}
 
-  // 방법 2: 모든 frame 순회
+  // 방법 2: 모든 frame
   for (const f of page.frames()) {
     if (f === page.mainFrame()) continue;
     try {
-      const clicked = await f.evaluate((idx) => {
+      await f.evaluate((t) => {
+        function fv(el) { return ((el?.innerText||'').trim().split(/[\t\n]/)[0]||'').replace(/\s+/g,'').trim(); }
         for (const table of document.querySelectorAll('table')) {
-          const hasDongho = Array.from(table.querySelectorAll('td')).some(
-            td => /^\d+\s*-\s*\d+$/.test((td.innerText || '').trim())
-          );
-          if (!hasDongho) continue;
-          const rows = Array.from(table.querySelectorAll('tbody tr'));
-          if (rows[idx]) { rows[idx].click(); return true; }
+          for (const row of table.querySelectorAll('tbody tr, tr')) {
+            const tds = Array.from(row.querySelectorAll('td'));
+            if (tds.length && fv(tds[0]).replace(/[-–—]/g,'-') === t) { row.click(); return; }
+          }
         }
-        return false;
-      }, rowIndex);
-      if (clicked) return;
+      }, target);
+      return;
     } catch {}
   }
 }
