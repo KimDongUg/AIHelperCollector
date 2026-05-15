@@ -40,12 +40,14 @@ async function runCollect(onProgress) {
 
     // 2단계: 이미 열린 관리비조회 탭에서 동호 목록 읽기
     onProgress({ current: 0, total: 0, unit: '② 관리비조회 목록 읽는 중...' });
-    const { feeFrame, feeUnits } = await readFeeUnitsFromOpenTab(page);
+    const feeUnitResult = await readFeeUnitsFromOpenTab(page);
+    const { feeFrame, feeUnits } = feeUnitResult;
 
     if (!feeUnits.length) {
+      const debug = feeUnitResult.debugInfo ? `\n[진단: ${feeUnitResult.debugInfo}]` : '';
       return {
         ok: false,
-        error: '관리비조회 동호내역이 없습니다.\nXpERP에서 관리비조회 → 조회 버튼을 먼저 클릭해주세요.',
+        error: `관리비조회 동호내역이 없습니다.\nXpERP에서 관리비조회 → 조회 버튼을 먼저 클릭해주세요.${debug}`,
       };
     }
 
@@ -133,41 +135,49 @@ async function readResidentFromOpenTab(page) {
 
 /* ═══════════════════════════════════════════════════════════
  *  관리비조회: 이미 열린 탭에서 동호 목록 읽기
+ *  — 모든 frame에서 "1-101" 패턴 테이블을 직접 탐색
  * ═══════════════════════════════════════════════════════════ */
 async function readFeeUnitsFromOpenTab(page) {
-  const frame = await findFrameByKeywords(page, ['동호내역', '부과년월', '고지내역']);
+  const allFrames = page.frames();
+  const frameUrls = allFrames.map(f => f.url().split('?')[0]).join(' | ');
 
-  if (!frame) {
-    return { feeFrame: page, feeUnits: [] };
+  for (const f of allFrames) {
+    const url = f.url();
+    if (!url || url === 'about:blank' || url === 'about:srcdoc') continue;
+
+    try {
+      const units = await f.evaluate(() => {
+        const result = [];
+        // "N - N" 또는 "N-N" 패턴 셀이 있는 테이블 탐색
+        for (const table of document.querySelectorAll('table')) {
+          const hasDongho = Array.from(table.querySelectorAll('td')).some(
+            td => /^\d+\s*-\s*\d+$/.test(td.innerText?.trim())
+          );
+          if (!hasDongho) continue;
+
+          Array.from(table.querySelectorAll('tbody tr')).forEach((row, idx) => {
+            const tds = Array.from(row.querySelectorAll('td'));
+            const dongho = tds[0]?.innerText?.trim() || '';
+            const m = dongho.match(/^(\d+)\s*-\s*(\d+)$/);
+            if (m) result.push({ dongho, dong: m[1], ho: m[2], _rowIndex: idx });
+          });
+          if (result.length > 0) break;
+        }
+        return result;
+      });
+
+      if (units.length > 0) {
+        return { feeFrame: f, feeUnits: units };
+      }
+    } catch {}
   }
 
-  const feeUnits = await frame.evaluate(() => {
-    const result = [];
-    const allTables = Array.from(document.querySelectorAll('table'));
-
-    // 동호내역 테이블: "1 - 101" 형식 행이 있는 테이블
-    let donghoTable = null;
-    for (const t of allTables) {
-      const hasDongho = Array.from(t.querySelectorAll('tr')).some(row => {
-        const text = row.querySelector('td')?.innerText?.trim() || '';
-        return /\d+\s*-\s*\d+/.test(text);
-      });
-      if (hasDongho) { donghoTable = t; break; }
-    }
-    if (!donghoTable) return result;
-
-    Array.from(donghoTable.querySelectorAll('tbody tr')).forEach((row, idx) => {
-      const tds    = Array.from(row.querySelectorAll('td'));
-      if (!tds.length) return;
-      const dongho = tds[0].innerText.trim();
-      const match  = dongho.match(/^(\d+)\s*-\s*(\d+)$/);
-      if (!match) return;
-      result.push({ dongho, dong: match[1], ho: match[2], _rowIndex: idx });
-    });
-    return result;
-  });
-
-  return { feeFrame: frame, feeUnits };
+  // 모든 frame 실패 시 진단 정보 포함 오류
+  return {
+    feeFrame: page,
+    feeUnits: [],
+    debugInfo: `열린 frame URLs: ${frameUrls}`,
+  };
 }
 
 /* ═══════════════════════════════════════════════════════════
