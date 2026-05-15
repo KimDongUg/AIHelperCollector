@@ -40,7 +40,9 @@ ipcMain.handle('open-erp-browser', async (_e, port, erpUrl) => {
   const cdpPort = port || 9222;
   const url = erpUrl || process.env.ERP_URL || '';
   const urlArg = url ? ` "${url}"` : '';
-  const flags = `--remote-debugging-port=${cdpPort}`;
+  // --user-data-dir로 기존 Edge와 분리된 CDP 전용 인스턴스 실행
+  const profileDir = `%LOCALAPPDATA%\\AIHelperCollector\\erp-cdp-profile`;
+  const flags = `--remote-debugging-port=${cdpPort} --user-data-dir="${profileDir}" --no-first-run`;
 
   return new Promise((resolve) => {
     exec(`start msedge ${flags}${urlArg}`, { shell: true }, (err) => {
