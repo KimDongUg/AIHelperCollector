@@ -140,36 +140,30 @@ async function readFeeUnitList(page) {
   try {
     const fl = page.frameLocator(SEL_FEE);
     const units = await fl.locator('body').evaluate(() => {
-      // 셀에 탭/줄바꿈으로 복합값 포함 시 첫 번째 값만 추출
-      function firstVal(el) {
-        const raw = (el?.innerText || el?.textContent || '').trim();
-        return (raw.split(/[\t\n]/)[0] || '').replace(/\s+/g, '').trim();
-      }
+      // innerText 전체에서 N-N 패턴 탐색 (공백 포함, 셀 내 어디든)
+      const RE = /\b(\d{1,4})\s*[-–—]\s*(\d{2,4})\b/;
       function parseTable(table) {
         const rows = [];
         Array.from(table.querySelectorAll('tbody tr, tr')).forEach((row) => {
           const tds = Array.from(row.querySelectorAll('td'));
           if (!tds.length) return;
-          const c0 = firstVal(tds[0]);
-          const m1 = c0.match(/^(\d+)[-–—](\d+)$/);
-          if (m1) { rows.push({ dongho: `${m1[1]}-${m1[2]}`, dong: m1[1], ho: m1[2] }); return; }
-          for (let ci = 0; ci < Math.min(tds.length - 1, 4); ci++) {
-            const ca = firstVal(tds[ci]);
-            const cb = firstVal(tds[ci + 1]);
-            if (/^\d{1,4}$/.test(ca) && /^\d{2,4}$/.test(cb)) {
-              rows.push({ dongho: `${ca}-${cb}`, dong: ca, ho: cb }); return;
+          // 앞쪽 4개 셀 중 N-N 패턴이 있는 셀 탐색
+          for (let ci = 0; ci < Math.min(tds.length, 4); ci++) {
+            const raw = tds[ci]?.innerText || '';
+            const m = raw.match(RE);
+            if (m && parseInt(m[1]) >= 1 && parseInt(m[2]) >= 1) {
+              rows.push({ dongho: `${m[1]}-${m[2]}`, dong: m[1], ho: m[2] });
+              return;
             }
           }
         });
         return rows;
       }
-      // 모든 테이블 수집 후 가장 큰 결과 선택 (동호내역 테이블)
-      let best = [];
+      let best = [], bestCount = 0;
       for (const table of document.querySelectorAll('table')) {
         const rows = parseTable(table);
-        if (rows.length > best.length) best = rows;
+        if (rows.length > bestCount) { bestCount = rows.length; best = rows; }
       }
-      // 중복 제거 (동일 동호 중복 방지)
       const seen = new Set();
       return best.filter(u => { if (seen.has(u.dongho)) return false; seen.add(u.dongho); return true; });
     });
@@ -199,35 +193,42 @@ async function readFeeUnitList(page) {
           return { tables: tables.length, cells: firstCells };
         } catch (e) { return { innerErr: e.message }; }
       });
-      diagLines.push(`[${urlShort}:T${diag.tables}:${JSON.stringify(diag.cells || [])}]`);
-      // 동호 패턴 탐색 — 모든 테이블 중 최대 결과 선택
-      const units = await f.evaluate(() => {
-        function firstVal(el) {
-          const raw = (el?.innerText || el?.textContent || '').trim();
-          return (raw.split(/[\t\n]/)[0] || '').replace(/\s+/g, '').trim();
+      // 가장 큰 테이블의 샘플 행도 수집
+      const sampleRows = await f.evaluate(() => {
+        let bestT = null, maxR = 0;
+        for (const t of document.querySelectorAll('table')) {
+          const c = t.querySelectorAll('tbody tr, tr').length;
+          if (c > maxR) { maxR = c; bestT = t; }
         }
+        if (!bestT) return { maxRows: 0, sample: [] };
+        const sample = Array.from(bestT.querySelectorAll('tbody tr, tr')).slice(1, 4).map(row =>
+          Array.from(row.querySelectorAll('td')).slice(0, 2).map(td => (td.innerText || '').substring(0, 15))
+        );
+        return { maxRows: maxR, sample };
+      }).catch(() => ({}));
+      diagLines.push(`[${urlShort}:T${diag.tables}:best=${sampleRows.maxRows}:${JSON.stringify(sampleRows.sample || [])}]`);
+      // 동호 패턴 탐색 — innerText 전체에서 N-N 탐색
+      const units = await f.evaluate(() => {
+        const RE = /\b(\d{1,4})\s*[-–—]\s*(\d{2,4})\b/;
         function parseTable(table) {
           const rows = [];
           Array.from(table.querySelectorAll('tbody tr, tr')).forEach((row) => {
             const tds = Array.from(row.querySelectorAll('td'));
             if (!tds.length) return;
-            const c0 = firstVal(tds[0]);
-            const m1 = c0.match(/^(\d+)[-–—](\d+)$/);
-            if (m1) { rows.push({ dongho: `${m1[1]}-${m1[2]}`, dong: m1[1], ho: m1[2] }); return; }
-            for (let ci = 0; ci < Math.min(tds.length - 1, 4); ci++) {
-              const ca = firstVal(tds[ci]);
-              const cb = firstVal(tds[ci + 1]);
-              if (/^\d{1,4}$/.test(ca) && /^\d{2,4}$/.test(cb)) {
-                rows.push({ dongho: `${ca}-${cb}`, dong: ca, ho: cb }); return;
+            for (let ci = 0; ci < Math.min(tds.length, 4); ci++) {
+              const raw = tds[ci]?.innerText || '';
+              const m = raw.match(RE);
+              if (m && parseInt(m[1]) >= 1 && parseInt(m[2]) >= 1) {
+                rows.push({ dongho: `${m[1]}-${m[2]}`, dong: m[1], ho: m[2] }); return;
               }
             }
           });
           return rows;
         }
-        let best = [];
+        let best = [], bestCount = 0;
         for (const table of document.querySelectorAll('table')) {
           const rows = parseTable(table);
-          if (rows.length > best.length) best = rows;
+          if (rows.length > bestCount) { bestCount = rows.length; best = rows; }
         }
         const seen = new Set();
         return best.filter(u => { if (seen.has(u.dongho)) return false; seen.add(u.dongho); return true; });
