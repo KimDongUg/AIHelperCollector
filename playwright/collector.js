@@ -140,23 +140,28 @@ async function readFeeUnitList(page) {
   try {
     const fl = page.frameLocator(SEL_FEE);
     const units = await fl.locator('body').evaluate(() => {
-      // textContent + 공백 제거로 탭/줄바꿈 포함 셀 처리
-      function normText(el) {
-        return (el?.textContent || '').replace(/\s+/g, '').trim();
+      // 셀에 탭/줄바꿈으로 복합값 포함 시 첫 번째 값만 추출
+      function firstVal(el) {
+        const raw = (el?.innerText || el?.textContent || '').trim();
+        return (raw.split(/[\t\n]/)[0] || '').replace(/\s+/g, '').trim();
       }
       const result = [];
       for (const table of document.querySelectorAll('table')) {
-        Array.from(table.querySelectorAll('tbody tr')).forEach((row, idx) => {
+        Array.from(table.querySelectorAll('tbody tr, tr')).forEach((row, idx) => {
           const tds = Array.from(row.querySelectorAll('td'));
           if (!tds.length) return;
-          const c0 = normText(tds[0]);
-          // 전략1: 첫 셀이 "N-N" 형태
+          // 전략1: 첫 셀 첫 값이 "N-N" 또는 "N" (동-호 합치거나 분리)
+          const c0 = firstVal(tds[0]);
           const m1 = c0.match(/^(\d+)[-–—](\d+)$/);
           if (m1) { result.push({ dongho: `${m1[1]}-${m1[2]}`, dong: m1[1], ho: m1[2], _rowIndex: idx }); return; }
-          // 전략2: 첫 셀=동(숫자), 두 번째 셀=호(숫자) 분리 형태
-          const c1 = normText(tds[1]);
-          if (/^\d{1,4}$/.test(c0) && /^\d{2,4}$/.test(c1)) {
-            result.push({ dongho: `${c0}-${c1}`, dong: c0, ho: c1, _rowIndex: idx });
+          // 전략2: 앞쪽 셀에서 동(숫자) + 다음 셀 호(숫자) 탐색
+          for (let ci = 0; ci < Math.min(tds.length - 1, 4); ci++) {
+            const ca = firstVal(tds[ci]);
+            const cb = firstVal(tds[ci + 1]);
+            if (/^\d{1,4}$/.test(ca) && /^\d{2,4}$/.test(cb)) {
+              result.push({ dongho: `${ca}-${cb}`, dong: ca, ho: cb, _rowIndex: idx });
+              return;
+            }
           }
         });
         if (result.length) break;
@@ -192,18 +197,24 @@ async function readFeeUnitList(page) {
       diagLines.push(`[${urlShort}:T${diag.tables}:${JSON.stringify(diag.cells || [])}]`);
       // 동호 패턴 탐색
       const units = await f.evaluate(() => {
-        function normText(el) { return (el?.textContent || '').replace(/\s+/g, '').trim(); }
+        function firstVal(el) {
+          const raw = (el?.innerText || el?.textContent || '').trim();
+          return (raw.split(/[\t\n]/)[0] || '').replace(/\s+/g, '').trim();
+        }
         const result = [];
         for (const table of document.querySelectorAll('table')) {
-          Array.from(table.querySelectorAll('tbody tr')).forEach((row, idx) => {
+          Array.from(table.querySelectorAll('tbody tr, tr')).forEach((row, idx) => {
             const tds = Array.from(row.querySelectorAll('td'));
             if (!tds.length) return;
-            const c0 = normText(tds[0]);
+            const c0 = firstVal(tds[0]);
             const m1 = c0.match(/^(\d+)[-–—](\d+)$/);
             if (m1) { result.push({ dongho: `${m1[1]}-${m1[2]}`, dong: m1[1], ho: m1[2], _rowIndex: idx }); return; }
-            const c1 = normText(tds[1]);
-            if (/^\d{1,4}$/.test(c0) && /^\d{2,4}$/.test(c1)) {
-              result.push({ dongho: `${c0}-${c1}`, dong: c0, ho: c1, _rowIndex: idx });
+            for (let ci = 0; ci < Math.min(tds.length - 1, 4); ci++) {
+              const ca = firstVal(tds[ci]);
+              const cb = firstVal(tds[ci + 1]);
+              if (/^\d{1,4}$/.test(ca) && /^\d{2,4}$/.test(cb)) {
+                result.push({ dongho: `${ca}-${cb}`, dong: ca, ho: cb, _rowIndex: idx }); return;
+              }
             }
           });
           if (result.length) break;
