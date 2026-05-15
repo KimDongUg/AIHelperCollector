@@ -91,16 +91,13 @@ async function fetchResidentMap(page) {
   await clickMenuByText(page, '입주자');
   await page.waitForTimeout(400);
   await clickMenuByText(page, '입주자현황');
-  await page.waitForTimeout(1000);
+  await page.waitForTimeout(1500);
 
-  const frame  = await getFrame(page);
-  const target = frame || page;
+  // 입주자현황 frame 탐지
+  const target = (await findFrameByKeyword(page, ['입주자현황', '입주여부', '주거형태'])) || page;
 
-  // 개인정보 표시 체크박스 활성화
   await checkPersonalInfoBox(target);
-
-  // 조회
-  await clickButtonByText(page, '조회');
+  await clickSearchButton(target);
   try {
     await target.waitForSelector('table tbody tr', { timeout: 10000 });
   } catch {
@@ -147,47 +144,30 @@ async function fetchResidentMap(page) {
 /* ═══════════════════════════════════════════════════════════
  *  관리비조회: 동호 목록 취득
  * ═══════════════════════════════════════════════════════════ */
+// 관리비조회 frame 캐시 (clickFeeUnit, collectUnitFeeData에서 재사용)
+let _feeFrame = null;
+
 async function fetchFeeUnits(page) {
   await clickMenuByText(page, '부과');
   await page.waitForTimeout(600);
   await clickMenuByText(page, '관리비조회');
-  await page.waitForTimeout(2000); // 관리비조회 페이지 완전 로딩 대기
+  await page.waitForTimeout(2000);
 
-  const frame  = await getFrame(page);
-  const target = frame || page;
+  // 관리비조회 frame 탐지 — 키워드로 올바른 탭 frame 찾기
+  _feeFrame = (await findFrameByKeyword(page, ['동호내역', '부과년월', '고지내역'])) || page;
 
-  await checkPersonalInfoBox(target);
-
-  // 조회 버튼 클릭 — 여러 방식 순차 시도
-  let clicked = false;
-  // 1) #BTN_INQUIRY ID
-  try {
-    await (frame || page).locator('#BTN_INQUIRY').first().evaluate(el => el.click());
-    clicked = true;
-  } catch {}
-  // 2) 조회 텍스트로 찾기
-  if (!clicked) {
-    try {
-      await (frame || page).locator(':text-is("조회")').first().evaluate(el => el.click());
-      clicked = true;
-    } catch {}
-  }
-  // 3) a 태그 href 패턴
-  if (!clicked) {
-    try {
-      await (frame || page).locator('a[onclick*="inquiry"], a[onclick*="Inquiry"], a[onclick*="search"]').first().evaluate(el => el.click());
-    } catch {}
-  }
+  await checkPersonalInfoBox(_feeFrame);
+  await clickSearchButton(_feeFrame);
 
   // 데이터 로딩 대기 (최대 20초)
   try {
-    await target.waitForSelector('table tbody tr', { timeout: 20000 });
+    await _feeFrame.waitForSelector('table tbody tr', { timeout: 20000 });
   } catch {
     await page.waitForTimeout(5000);
   }
 
   // 동호내역(첫 번째 테이블)에서 목록 파싱
-  return await target.evaluate(() => {
+  return await _feeFrame.evaluate(() => {
     const result = [];
     // 동호내역 테이블: "1 - 101" 형식 행이 포함된 테이블 찾기
     const allTables = Array.from(document.querySelectorAll('table'));
@@ -226,8 +206,7 @@ async function fetchFeeUnits(page) {
  *  관리비조회: 특정 호 클릭
  * ═══════════════════════════════════════════════════════════ */
 async function clickFeeUnit(page, rowIndex) {
-  const frame  = await getFrame(page);
-  const target = frame || page;
+  const target = _feeFrame || page;
   const rows   = await target.$$('table tbody tr');
   if (rows[rowIndex]) await rows[rowIndex].evaluate(el => el.click());
 }
@@ -237,8 +216,7 @@ async function clickFeeUnit(page, rowIndex) {
  *  (고지내역 / 검침내역 / 할인내역 / 항목별 부과내역)
  * ═══════════════════════════════════════════════════════════ */
 async function collectUnitFeeData(page) {
-  const frame  = await getFrame(page);
-  const target = frame || page;
+  const target = _feeFrame || page;
 
   return await target.evaluate(() => {
     const data = {};
@@ -315,9 +293,53 @@ async function collectUnitFeeData(page) {
 /* ═══════════════════════════════════════════════════════════
  *  helpers
  * ═══════════════════════════════════════════════════════════ */
+
+/**
+ * 페이지 내 모든 frame을 순회하여 특정 키워드가 포함된 frame 반환.
+ * XpERP는 탭마다 별도 iframe을 사용하므로 키워드로 올바른 frame을 찾아야 함.
+ */
+async function findFrameByKeyword(page, keywords) {
+  const frames = page.frames();
+  for (const f of frames) {
+    if (f === page.mainFrame()) continue;
+    if (!f.url() || f.url().startsWith('about:')) continue;
+    try {
+      const found = await f.evaluate((kws) =>
+        kws.some(k => document.body?.innerText?.includes(k)),
+        keywords
+      );
+      if (found) return f;
+    } catch {}
+  }
+  // 키워드 매칭 실패 시 메인 외 첫 번째 유효 frame 반환
+  for (const f of frames) {
+    if (f === page.mainFrame()) continue;
+    if (!f.url() || f.url().startsWith('about:')) continue;
+    try {
+      const hasBody = await f.evaluate(() => (document.body?.innerText?.length || 0) > 50);
+      if (hasBody) return f;
+    } catch {}
+  }
+  return null;
+}
+
+/** 모든 frame에서 클릭 시도 — 성공한 frame 반환 */
+async function clickInAnyFrame(page, selectors) {
+  const selectorStr = Array.isArray(selectors) ? selectors.join(', ') : selectors;
+
+  // 1. 각 frame 시도
+  for (const f of page.frames()) {
+    try {
+      const el = f.locator(selectorStr).first();
+      await el.evaluate(node => node.click());
+      return f; // 성공
+    } catch {}
+  }
+  return null;
+}
+
 async function checkPersonalInfoBox(target) {
   try {
-    // "개인정보 표시" 체크박스 활성화
     const cb = await target.$('input[type="checkbox"]');
     if (cb && !(await cb.isChecked())) {
       await cb.evaluate(el => el.click());
@@ -334,23 +356,21 @@ async function clickMenuByText(page, text) {
   } catch {}
 }
 
-async function clickButtonByText(page, text) {
-  const frame  = await getFrame(page);
-  const target = frame || page;
-
-  const knownIds = { '조회': '#BTN_INQUIRY' };
-  if (knownIds[text]) {
+/** 단일 frame 내에서 조회 버튼 클릭 */
+async function clickSearchButton(target) {
+  const selectors = [
+    '#BTN_INQUIRY',
+    'a:has-text("조회")',
+    'button:has-text("조회")',
+    'input[value="조회"]',
+  ];
+  for (const sel of selectors) {
     try {
-      const el = target.locator(knownIds[text]).first();
+      const el = target.locator(sel).first();
       await el.evaluate(node => node.click());
       return;
     } catch {}
   }
-
-  const btn = target.locator(
-    `button:text-is("${text}"), input[value="${text}"], a:text-is("${text}")`
-  ).first();
-  await btn.evaluate(node => node.click());
 }
 
 async function getFrame(page) {
