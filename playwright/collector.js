@@ -18,10 +18,10 @@ const { saveErrorLog }= require('./logger');
 let stopFlag = false;
 function stopCollect() { stopFlag = true; }
 
-// 관리비조회 iframe 셀렉터 — URL에 010m01 또는 OCCP1010/RECP1010 포함
-const SEL_FEE      = 'iframe[src*="010m01"], iframe[src*="OCCP1010"], iframe[src*="RECP1010"]';
-// 입주자현황 iframe 셀렉터 — URL에 020m0 또는 IMPO2020/OCCP19940 포함
-const SEL_RESIDENT = 'iframe[src*="020m"], iframe[src*="IMPO2020"], iframe[src*="OCCP19940"]';
+// 관리비조회 iframe: impo_703m01.do (T61, 동-호 포함)
+const SEL_FEE      = 'iframe[src*="703m01"], iframe[src*="010m01"], iframe[src*="OCCP1010"]';
+// 입주자현황 iframe: occp_020m02.do (T9)
+const SEL_RESIDENT = 'iframe[src*="020m02"], iframe[src*="020m"], iframe[src*="IMPO2020"]';
 
 /* ═══════════════════════════════════════════════════════════
  *  MAIN
@@ -140,17 +140,24 @@ async function readFeeUnitList(page) {
   try {
     const fl = page.frameLocator(SEL_FEE);
     const units = await fl.locator('body').evaluate(() => {
+      // textContent + 공백 제거로 탭/줄바꿈 포함 셀 처리
+      function normText(el) {
+        return (el?.textContent || '').replace(/\s+/g, '').trim();
+      }
       const result = [];
       for (const table of document.querySelectorAll('table')) {
-        const hasDongho = Array.from(table.querySelectorAll('td')).some(
-          td => /^\d+\s*-\s*\d+$/.test((td.innerText || '').trim())
-        );
-        if (!hasDongho) continue;
         Array.from(table.querySelectorAll('tbody tr')).forEach((row, idx) => {
-          const tds    = Array.from(row.querySelectorAll('td'));
-          const dongho = (tds[0]?.innerText || '').trim();
-          const m      = dongho.match(/^(\d+)\s*-\s*(\d+)$/);
-          if (m) result.push({ dongho, dong: m[1], ho: m[2], _rowIndex: idx });
+          const tds = Array.from(row.querySelectorAll('td'));
+          if (!tds.length) return;
+          const c0 = normText(tds[0]);
+          // 전략1: 첫 셀이 "N-N" 형태
+          const m1 = c0.match(/^(\d+)[-–—](\d+)$/);
+          if (m1) { result.push({ dongho: `${m1[1]}-${m1[2]}`, dong: m1[1], ho: m1[2], _rowIndex: idx }); return; }
+          // 전략2: 첫 셀=동(숫자), 두 번째 셀=호(숫자) 분리 형태
+          const c1 = normText(tds[1]);
+          if (/^\d{1,4}$/.test(c0) && /^\d{2,4}$/.test(c1)) {
+            result.push({ dongho: `${c0}-${c1}`, dong: c0, ho: c1, _rowIndex: idx });
+          }
         });
         if (result.length) break;
       }
@@ -185,17 +192,19 @@ async function readFeeUnitList(page) {
       diagLines.push(`[${urlShort}:T${diag.tables}:${JSON.stringify(diag.cells || [])}]`);
       // 동호 패턴 탐색
       const units = await f.evaluate(() => {
+        function normText(el) { return (el?.textContent || '').replace(/\s+/g, '').trim(); }
         const result = [];
         for (const table of document.querySelectorAll('table')) {
-          const hasDongho = Array.from(table.querySelectorAll('td')).some(
-            td => /^\d+\s*-\s*\d+$/.test((td.innerText || '').trim())
-          );
-          if (!hasDongho) continue;
           Array.from(table.querySelectorAll('tbody tr')).forEach((row, idx) => {
-            const tds    = Array.from(row.querySelectorAll('td'));
-            const dongho = (tds[0]?.innerText || '').trim();
-            const m      = dongho.match(/^(\d+)\s*-\s*(\d+)$/);
-            if (m) result.push({ dongho, dong: m[1], ho: m[2], _rowIndex: idx });
+            const tds = Array.from(row.querySelectorAll('td'));
+            if (!tds.length) return;
+            const c0 = normText(tds[0]);
+            const m1 = c0.match(/^(\d+)[-–—](\d+)$/);
+            if (m1) { result.push({ dongho: `${m1[1]}-${m1[2]}`, dong: m1[1], ho: m1[2], _rowIndex: idx }); return; }
+            const c1 = normText(tds[1]);
+            if (/^\d{1,4}$/.test(c0) && /^\d{2,4}$/.test(c1)) {
+              result.push({ dongho: `${c0}-${c1}`, dong: c0, ho: c1, _rowIndex: idx });
+            }
           });
           if (result.length) break;
         }
