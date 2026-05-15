@@ -158,14 +158,21 @@ async function fetchUnitList(page) {
 
   // 조회 버튼 클릭 (전체 세대 조회)
   await clickButtonByText(page, SELECTORS.btnSearch);
-  await page.waitForTimeout(2000);
+  await page.waitForTimeout(4000); // 데이터 로딩 대기
 
   // iframe 대응
   const frame = await getFrame(page);
   const target = frame || page;
 
-  // 테이블 행 파싱
-  const rows = await target.$$(SELECTORS.unitTableRow);
+  // 테이블 행 파싱 — 여러 셀렉터 시도
+  let rows = await target.$$(SELECTORS.unitTableRow);
+  if (rows.length === 0) rows = await target.$$('tr.jqgrow');
+  if (rows.length === 0) rows = await target.$$('tbody tr');
+  if (rows.length === 0) {
+    const allTr = await target.$$('tr');
+    throw new Error(`세대 목록 없음 (table tbody tr: 0개, 전체 tr: ${allTr.length}개). XpERP 화면에서 조회 결과가 표시되는지 확인하세요.`);
+  }
+
   const units = [];
 
   for (const row of rows) {
@@ -174,7 +181,8 @@ async function fetchUnitList(page) {
 
     const dong = (await cells[SELECTORS.colDong]?.innerText() || '').trim();
     const ho = (await cells[SELECTORS.colHo]?.innerText() || '').trim();
-    if (!dong || !ho || isNaN(Number(dong)) || isNaN(Number(ho))) continue;
+    // 숫자가 아닌 동/호도 허용 (예: A동, B동 등)
+    if (!dong || !ho) continue;
 
     const ownerName = cells[SELECTORS.colOwnerName]
       ? (await cells[SELECTORS.colOwnerName].innerText()).trim()
