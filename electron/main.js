@@ -42,6 +42,20 @@ ipcMain.handle('open-erp-browser', async (_e, port, erpUrl) => {
   const urlArg = url ? ` "${url}"` : '';
   const flags = `--remote-debugging-port=${cdpPort}`;
 
+  // Edge 백그라운드 프로세스까지 완전 종료 후 CDP 모드로 재시작
+  const confirmed = dialog.showMessageBoxSync(mainWindow, {
+    type: 'question',
+    buttons: ['계속', '취소'],
+    defaultId: 0,
+    title: 'Edge 재시작',
+    message: '기존 Edge를 종료하고 ERP 연결 모드로 재시작합니다.\n열려 있는 Edge 탭이 닫힙니다. 계속하시겠습니까?',
+  });
+  if (confirmed !== 0) return { ok: false, error: '취소됨' };
+
+  // 기존 Edge/Chrome 프로세스 강제 종료
+  await new Promise((resolve) => exec('taskkill /f /im msedge.exe', { shell: true }, () => resolve()));
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+
   return new Promise((resolve) => {
     exec(`start msedge ${flags}${urlArg}`, { shell: true }, (err) => {
       if (!err) { resolve({ ok: true }); return; }
