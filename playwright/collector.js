@@ -118,8 +118,8 @@ async function runCollect(onProgress) {
         saveErrorLog(logsDir, unitLabel, err.message);
       }
 
-      // 세대 간 간격
-      await page.waitForTimeout(300);
+      // 세대 간 최소 간격
+      await page.waitForTimeout(100);
     }
 
     if (allData.length === 0) {
@@ -156,9 +156,15 @@ async function fetchUnitList(page) {
   await clickMenuByText(page, SELECTORS.menuOwnerChange);
   await page.waitForTimeout(1000);
 
-  // 조회 버튼 클릭 (전체 세대 조회)
+  // 조회 버튼 클릭 → 테이블에 행이 나타날 때까지 대기 (최대 15초)
   await clickButtonByText(page, SELECTORS.btnSearch);
-  await page.waitForTimeout(4000); // 데이터 로딩 대기
+  const frame0 = await getFrame(page);
+  const target0 = frame0 || page;
+  try {
+    await target0.waitForSelector('table tbody tr, tr.jqgrow, tbody tr', { timeout: 15000 });
+  } catch {
+    await page.waitForTimeout(4000); // fallback
+  }
 
   // iframe 대응
   const frame = await getFrame(page);
@@ -201,15 +207,13 @@ async function fetchUnitList(page) {
  * 관리비조회 탭에서 해당 세대의 관리비 데이터 수집
  */
 async function collectFeeForUnit(page, unit) {
-  // 세대 행 클릭
   if (unit._row) {
-    await unit._row.click();
-    await page.waitForTimeout(600);
+    await unit._row.evaluate((el) => el.click());
+    await page.waitForTimeout(300);
   }
 
-  // 관리비조회 탭으로 이동
   await clickTabByText(page, SELECTORS.tabFee);
-  await page.waitForTimeout(800);
+  await page.waitForTimeout(400);
 
   const frame = await getFrame(page);
   const target = frame || page;
@@ -245,7 +249,7 @@ async function collectFeeForUnit(page, unit) {
  */
 async function collectResidentForUnit(page, unit) {
   await clickTabByText(page, SELECTORS.tabMoveIn);
-  await page.waitForTimeout(800);
+  await page.waitForTimeout(400);
 
   const frame = await getFrame(page);
   const target = frame || page;
