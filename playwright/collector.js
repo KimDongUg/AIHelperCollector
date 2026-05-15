@@ -187,8 +187,9 @@ async function fetchUnitList(page) {
 
     const dong = (await cells[SELECTORS.colDong]?.innerText() || '').trim();
     const ho = (await cells[SELECTORS.colHo]?.innerText() || '').trim();
-    // 숫자가 아닌 동/호도 허용 (예: A동, B동 등)
     if (!dong || !ho) continue;
+    // 합계 행 제외
+    if (dong === '합계' || ho === '합계' || dong.includes('합계')) continue;
 
     const ownerName = cells[SELECTORS.colOwnerName]
       ? (await cells[SELECTORS.colOwnerName].innerText()).trim()
@@ -197,7 +198,8 @@ async function fetchUnitList(page) {
       ? (await cells[SELECTORS.colOwnerPhone].innerText()).trim()
       : '';
 
-    units.push({ dong, ho, ownerName, ownerPhone, _row: row });
+    // _row 대신 인덱스 저장 (스테일 핸들 방지)
+    units.push({ dong, ho, ownerName, ownerPhone, _rowIndex: units.length });
   }
 
   return units;
@@ -207,8 +209,15 @@ async function fetchUnitList(page) {
  * 관리비조회 탭에서 해당 세대의 관리비 데이터 수집
  */
 async function collectFeeForUnit(page, unit) {
-  if (unit._row) {
-    await unit._row.evaluate((el) => el.click());
+  // 인덱스로 행 재조회 후 클릭 (스테일 핸들 방지)
+  if (unit._rowIndex !== undefined) {
+    const frame = await getFrame(page);
+    const target = frame || page;
+    let rows = await target.$$(SELECTORS.unitTableRow);
+    if (rows.length === 0) rows = await target.$$('tr.jqgrow');
+    if (rows.length === 0) rows = await target.$$('tbody tr');
+    const row = rows[unit._rowIndex];
+    if (row) await row.evaluate((el) => el.click());
     await page.waitForTimeout(300);
   }
 
@@ -313,7 +322,8 @@ async function clickTabByText(page, text) {
   const frame = await getFrame(page);
   const target = frame || page;
   try {
-    const tab = await target.locator(`text-is="${text}"`).first();
+    // :text-is() = 정확 일치 CSS 의사클래스
+    const tab = await target.locator(`:text-is("${text}")`).first();
     await tab.click({ timeout: 5000 });
     await page.waitForTimeout(300);
   } catch {
