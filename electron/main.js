@@ -40,9 +40,7 @@ ipcMain.handle('open-erp-browser', async (_e, port, erpUrl) => {
   const cdpPort = port || 9222;
   const url = erpUrl || process.env.ERP_URL || '';
   const urlArg = url ? ` "${url}"` : '';
-  // --user-data-dir로 별도 프로필 생성 → 기존 Edge 실행 중이어도 CDP 포트가 적용된 새 인스턴스 강제 실행
-  const profileDir = `%TEMP%\\erp-cdp-profile`;
-  const flags = `--remote-debugging-port=${cdpPort} --user-data-dir="${profileDir}"`;
+  const flags = `--remote-debugging-port=${cdpPort}`;
 
   return new Promise((resolve) => {
     exec(`start msedge ${flags}${urlArg}`, { shell: true }, (err) => {
