@@ -93,8 +93,25 @@ async function fetchResidentMap(page) {
   await clickMenuByText(page, '입주자현황');
   await page.waitForTimeout(1500);
 
-  // 입주자현황 frame 탐지
-  const target = (await findFrameByKeyword(page, ['입주자현황', '입주여부', '주거형태'])) || page;
+  // 입주자현황 iframe 탐지 — 최대 10초 대기
+  let residentFrame = null;
+  for (let i = 0; i < 20 && !residentFrame; i++) {
+    for (const f of page.frames()) {
+      if (f === page.mainFrame()) continue;
+      const url = f.url();
+      if (!url || url === 'about:blank' || url === 'about:srcdoc') continue;
+      try {
+        const ok = await f.evaluate(() =>
+          !!(document.body?.innerText?.includes('입주여부') ||
+             document.body?.innerText?.includes('주거형태') ||
+             document.body?.innerText?.includes('입주자현황'))
+        );
+        if (ok) { residentFrame = f; break; }
+      } catch {}
+    }
+    if (!residentFrame) await page.waitForTimeout(500);
+  }
+  const target = residentFrame || page;
 
   await checkPersonalInfoBox(target);
   await clickSearchButton(target);
@@ -153,13 +170,24 @@ async function fetchFeeUnits(page) {
   await clickMenuByText(page, '관리비조회');
   await page.waitForTimeout(2000);
 
-  // 관리비조회 frame 탐지 — 최대 3회 재시도
-  for (let i = 0; i < 3; i++) {
-    _feeFrame = await findFrameByKeyword(page, ['동호내역', '부과년월', '고지내역']);
-    if (_feeFrame) break;
-    await page.waitForTimeout(1000);
+  // 관리비조회 iframe 탐지 — URL 패턴 + 키워드, 최대 10초 대기
+  _feeFrame = null;
+  for (let i = 0; i < 20 && !_feeFrame; i++) {
+    for (const f of page.frames()) {
+      if (f === page.mainFrame()) continue;
+      const url = f.url();
+      if (!url || url === 'about:blank' || url === 'about:srcdoc') continue;
+      try {
+        const ok = await f.evaluate(() =>
+          !!(document.body?.innerText?.includes('동호내역') ||
+             document.body?.innerText?.includes('부과년월'))
+        );
+        if (ok) { _feeFrame = f; break; }
+      } catch {}
+    }
+    if (!_feeFrame) await page.waitForTimeout(500);
   }
-  if (!_feeFrame) _feeFrame = page;
+  if (!_feeFrame) _feeFrame = page; // fallback
 
   await checkPersonalInfoBox(_feeFrame);
   await clickSearchButton(_feeFrame);
