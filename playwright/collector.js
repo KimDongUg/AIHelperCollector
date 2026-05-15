@@ -279,7 +279,10 @@ async function clickMenuByText(page, text) {
 async function clickButtonByText(page, text) {
   const frame = await getFrame(page);
   const target = frame || page;
-  const btn = await target.locator(`button:has-text("${text}"), input[value="${text}"], a:has-text("${text}")`).first();
+  // :text-is() = 정확히 일치 (has-text는 부분 일치라 "중간정산서조회" 등 오매칭 발생)
+  const btn = await target.locator(
+    `button:text-is("${text}"), input[value="${text}"], a:text-is("${text}")`
+  ).first();
   await btn.click({ timeout: 5000 });
 }
 
@@ -287,7 +290,7 @@ async function clickTabByText(page, text) {
   const frame = await getFrame(page);
   const target = frame || page;
   try {
-    const tab = await target.locator(`text="${text}"`).first();
+    const tab = await target.locator(`text-is="${text}"`).first();
     await tab.click({ timeout: 5000 });
     await page.waitForTimeout(300);
   } catch {
@@ -298,11 +301,16 @@ async function clickTabByText(page, text) {
 async function getFrame(page) {
   try {
     const frames = page.frames();
-    // XpERP는 mainFrame 또는 contentFrame 사용
-    const mainFrame = frames.find(
+    // 1. 명칭으로 탐색
+    const named = frames.find(
       (f) => f.name() === 'mainFrame' || f.name() === 'contentFrame' || f.name() === 'iframe'
     );
-    return mainFrame || null;
+    if (named) return named;
+    // 2. 메인 프레임 외 컨텐츠 프레임 탐색 (XpERP 탭 영역)
+    const content = frames.find(
+      (f) => f !== page.mainFrame() && f.url() && !f.url().startsWith('about:')
+    );
+    return content || null;
   } catch {
     return null;
   }
