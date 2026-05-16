@@ -7,9 +7,9 @@
  *       → table.IBSection (내부 실제 데이터)
  *         → tbody > tr.IBDataRow (실제 데이터 행)
  *
- * 숨김 컬럼 2종:
- *   - style="width:0px"          (IBSheet 외부 테이블 숨김)
- *   - class="HideColXXX ..."     (IBSection 내부 컬럼 숨김)
+ * 숨김 컬럼: style="width:0px" 만 필터
+ *   ※ HideColXXX 클래스는 IBSheet 컬럼 식별자일 뿐 숨김과 무관 — 필터하지 않음
+ *   실제 DOM 확인: td.HideCol0APT_NO_ROOM = "1 - 101" (동호, 실제 표시됨)
  *
  * 섹션 셀렉터:
  *   입주자현황       : .cont_table
@@ -109,12 +109,11 @@ async function runCollect(onProgress) {
  * ═══════════════════════════════════════════════════════════ */
 async function readResidentData(page) {
   const fn = () => {
-    // IBSheet 숨김 TD 2종 필터
+    // IBSheet 숨김 TD 필터 — width:0px 만 제거 (HideColXXX 클래스는 표시 컬럼에도 있음)
     function visTds(row) {
       return Array.from(row.querySelectorAll('td')).filter(td => {
-        if (td.style.width === '0px' || td.style.width === '0') return false;
-        for (const cls of td.classList) { if (cls.startsWith('HideCol')) return false; }
-        return true;
+        const w = td.style.width;
+        return w !== '0px' && w !== '0' && td.style.display !== 'none';
       });
     }
     function findPhone(tds) {
@@ -165,7 +164,8 @@ async function readResidentData(page) {
  * ═══════════════════════════════════════════════════════════ */
 async function readFeeUnitList(page) {
   const fn = () => {
-    const RE = /\b(\d{1,4})\s*[-–—]\s*(\d{2,4})\b/;
+    // 사업자번호(NNN-NN-NNNNN) 오탐 방지: 뒤에 또 다른 -숫자가 오면 제외
+    const RE = /\b(\d{1,4})\s*[-–—]\s*(\d{2,4})\b(?!\s*[-–—]\s*\d)/;
 
     function visTds(row) {
       return Array.from(row.querySelectorAll('td')).filter(td => {
@@ -281,7 +281,8 @@ async function clickFeeUnit(page, dong, ho) {
   const target = `${dong}-${ho}`;
 
   const fn = (t) => {
-    const RE = /\b(\d{1,4})\s*[-–—]\s*(\d{2,4})\b/;
+    // 사업자번호(NNN-NN-NNNNN) 오탐 방지: 뒤에 또 다른 -숫자가 오면 제외
+    const RE = /\b(\d{1,4})\s*[-–—]\s*(\d{2,4})\b(?!\s*[-–—]\s*\d)/;
     const [d, h] = t.split('-');
 
     function visTds(row) {
@@ -370,14 +371,20 @@ async function collectFeeData(page) {
       const ib = Array.from(container.querySelectorAll('tr.IBDataRow'));
       return ib.length ? ib : Array.from(container.querySelectorAll('tbody tr'));
     }
+    // IBSheet 빈 데이터 안내 메시지 목록
+    const NODATA_MSGS = ['조회된 데이터가 없습니다.', '데이터가 없습니다.', '조회결과가 없습니다.'];
+
     // (항목명|금액) 쌍 반복 추출 — 2컬럼/4컬럼/6컬럼 모두 처리
     function extractPairs(container, prefix, skipKeys) {
       for (const row of dataRows(container)) {
         const cells = visTds(row);
+        // IBSheet 빈 데이터 메시지 행 스킵
+        if (cells.length === 1 && NODATA_MSGS.some(m => cells[0].innerText.includes(m))) continue;
         for (let i = 0; i + 1 < cells.length; i += 2) {
           const key = cells[i].innerText.trim();
           const val = txt(cells[i + 1]);
           if (!key || skipKeys.includes(key)) continue;
+          if (NODATA_MSGS.some(m => val.includes(m))) continue;
           data[prefix ? `${prefix}_${key}` : key] = val;
         }
       }
@@ -395,6 +402,7 @@ async function collectFeeData(page) {
     for (const row of dataRows(meterEl)) {
       const cells = visTds(row);
       if (!cells.length) continue;
+      if (cells.length === 1 && NODATA_MSGS.some(m => cells[0].innerText.includes(m))) continue;
       const item = cells[0]?.innerText.trim();
       if (!item || ['검침항목', '항목', '합계', ''].includes(item)) continue;
       const pfx = `검침_${item}`;
