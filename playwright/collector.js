@@ -146,17 +146,13 @@ async function readResidentData(page) {
 
     // ── 방법 A: IBSheet.Rows 전체 행 접근 ──────────────────
     if (sheet && sheet.Rows && typeof sheet.Rows === 'object') {
-      // DOM 첫 행에서 동/호 컬럼 ID 탐색
-      const firstRow = container.querySelector('tr.IBDataRow');
-      const sampleTds = firstRow ? visTds(firstRow) : [];
-      const dongColId = sampleTds[0] ? getColId(sampleTds[0]) : null;
-      const hoColId   = sampleTds[1] ? getColId(sampleTds[1]) : null;
+      // ── 컬럼 통계 탐색 (DOM 가시성 무관) ─────────────────────
+      const arAllKeys = Object.keys(sheet.Rows)
+        .filter(k => /^AR\d+$/.test(k))
+        .sort((a, b) => parseInt(a.slice(2)) - parseInt(b.slice(2)));
 
-      // 전화번호 컬럼 ID 탐색 (3단계)
+      // 전화번호 컬럼: 010/011 패턴 값 보유
       let phoneColId = null;
-
-      // 1단계: 전체 행 스캔으로 010... 패턴 컬럼 탐색
-      const arAllKeys = Object.keys(sheet.Rows).filter(k => /^AR\d+$/.test(k));
       for (const key of arAllKeys) {
         const rd = sheet.Rows[key];
         if (!rd) continue;
@@ -167,15 +163,42 @@ async function readResidentData(page) {
         }
         if (phoneColId) break;
       }
-
-      // 2단계: 컬럼 ID 이름에 HP/MOBILE/CELL 포함된 컬럼
+      // 패턴 미발견 시 컬럼 이름으로 추가 탐색
       if (!phoneColId) {
         const firstRd = sheet.Rows[arAllKeys[0]] || {};
-        const phoneKeywords = ['HP_NO','HP','MOBILE','MOBILE_NO','CELL','TEL','PHONE'];
-        phoneColId = Object.keys(firstRd).find(k =>
-          phoneKeywords.some(kw => k.toUpperCase().includes(kw))
-        ) || null;
+        const kwds = ['HP_NO','HP','MOBILE','MOBILE_NO','CELL','PHONE','TEL'];
+        phoneColId = Object.keys(firstRd)
+          .find(k => kwds.some(w => k.toUpperCase().includes(w))) || null;
       }
+
+      // 동/호 컬럼: 샘플 20행의 값 분포로 통계 탐색
+      // 동 컬럼: 소수(1-99)이며 행 간 거의 동일
+      // 호 컬럼: 101-9999 범위의 다양한 값
+      const sample = arAllKeys.slice(0, 20)
+        .map(k => sheet.Rows[k]).filter(Boolean);
+      const colDongSets = {}, colHoSets = {};
+      for (const rd of sample) {
+        for (const [col, val] of Object.entries(rd)) {
+          const v = String(val || '').trim();
+          const n = parseInt(v);
+          if (/^\d{1,2}$/.test(v) && n >= 1 && n <= 99) {
+            colDongSets[col] = colDongSets[col] || new Set();
+            colDongSets[col].add(v);
+          }
+          if (/^\d{3,4}$/.test(v) && n >= 101 && n <= 9999
+              && !(n >= 1900 && n <= 2100)) {
+            colHoSets[col] = colHoSets[col] || new Set();
+            colHoSets[col].add(v);
+          }
+        }
+      }
+      // 동 컬럼: 작은 고유값 수 (같은 동 내 단위는 동 값이 동일)
+      const dongColId = Object.entries(colDongSets)
+        .sort(([,a],[,b]) => a.size - b.size)[0]?.[0] || null;
+      // 호 컬럼: 많은 고유값 (각 세대마다 다른 호)
+      const hoColId = Object.entries(colHoSets)
+        .filter(([col]) => col !== dongColId)
+        .sort(([,a],[,b]) => b.size - a.size)[0]?.[0] || null;
 
       if (dongColId && hoColId) {
         const arKeys = Object.keys(sheet.Rows)
@@ -341,27 +364,27 @@ async function readFeeUnitList(page) {
 /* ═══════════════════════════════════════════════════════════
  *  관리비조회: 특정 호 행 클릭
  *
- *  listIndex(0-based) 기반 scroll → APT_NO_ROOM 셀 스캔 → 클릭
- *  IBSheet API 가능하면 정확한 위치로 스크롤, 아니면 근사값 사용
+ *  핵심: element.click() (isTrusted=false, which=0) → IBSheet 무시
+ *  해결: Playwright locator.click() → CDP 레벨 실제 마우스 이벤트 (isTrusted=true)
+ *
+ *  Phase 1: JS evaluate로 IBSheet 스크롤 (렌더 강제)
+ *  Phase 2: Playwright locator.click() 로 신뢰된 클릭 전송
  * ═══════════════════════════════════════════════════════════ */
 async function clickFeeUnit(page, dong, ho, listIndex = 0) {
   const target = `${dong}-${ho}`;
 
-  // Phase 1: 목표 행 위치로 스크롤 + dispatchEvent (IBSheet 즉시 재렌더 강제)
+  // Phase 1: IBSheet 스크롤 (JS evaluate)
   const scrollFn = (params) => {
     const { t, li } = params;
     const sheetA = document.querySelector('#sheetDivA');
-    if (!sheetA) return false;
-    const scrollEl = sheetA.querySelector('.IBSectionScroll');
-    if (!scrollEl) return false;
+    const scrollEl = sheetA?.querySelector('.IBSectionScroll');
+    if (!scrollEl) return;
 
-    let newTop = Math.max(0, li * 20 - scrollEl.clientHeight / 2); // 기본값
-
-    // IBSheet.Rows로 정확한 행 위치 탐색
+    let newTop = Math.max(0, li * 20 - scrollEl.clientHeight / 2);
     try {
       const m = (scrollEl.getAttribute('onscroll') || '').match(/IBSheet\[(\d+)\]/);
       const sheet = window.IBSheet?.[m ? parseInt(m[1]) : 0];
-      if (sheet && sheet.Rows) {
+      if (sheet?.Rows) {
         for (const key of Object.keys(sheet.Rows)) {
           if (!/^AR\d+$/.test(key)) continue;
           const v = (sheet.Rows[key]?.['APT_NO_ROOM'] || '').trim()
@@ -371,47 +394,44 @@ async function clickFeeUnit(page, dong, ho, listIndex = 0) {
           break;
         }
       }
-    } catch (e) {}
+    } catch(e) {}
 
     scrollEl.scrollTop = newTop;
-    // IBSheet ScrolledBody를 즉시(동기적으로) 강제 실행 → DOM 재렌더
-    scrollEl.dispatchEvent(new Event('scroll'));
-    return true;
+    scrollEl.dispatchEvent(new Event('scroll')); // IBSheet 재렌더 강제
   };
 
-  // Phase 2: TD 직접 클릭 (IBSheet SheetClick은 TR이 아닌 TD 대상 필요)
-  const clickFn = (t) => {
-    const sheetA = document.querySelector('#sheetDivA');
-    if (!sheetA) return false;
-    for (const row of sheetA.querySelectorAll('tr.IBDataRow')) {
-      const td = row.querySelector('[class*="APT_NO_ROOM"]');
-      if (!td) continue;
-      const text = (td.innerText || '').trim().replace(/\s+/g, '').replace(/[-–—]/g, '-');
-      if (text === t) { td.click(); return true; } // TD 클릭
-    }
-    return false;
-  };
+  // Phase 2: Playwright 네이티브 클릭 (CDP 이벤트 → isTrusted=true)
+  const playwrightClick = async (fl) => {
+    try {
+      // 스크롤 먼저
+      await fl.locator('body').evaluate(scrollFn, { t: target, li: listIndex });
+      await page.waitForTimeout(150);
 
-  const executeClick = async (evalFn) => {
-    // 먼저 visible 행에서 직접 시도
-    if (await evalFn(clickFn, target)) return true;
-    // 없으면 스크롤 후 재시도
-    await evalFn(scrollFn, { t: target, li: listIndex });
-    await page.waitForTimeout(100);
-    return await evalFn(clickFn, target);
+      // APT_NO_ROOM 셀 중 "N - NNN" 텍스트 매칭 → Playwright 클릭
+      const re = new RegExp(`^\\s*${dong}\\s*[-–—]\\s*${ho}\\s*$`);
+      const cellLoc = fl.locator('#sheetDivA [class*="APT_NO_ROOM"]').filter({ hasText: re });
+
+      const cnt = await cellLoc.count();
+      if (cnt === 0) return false;
+
+      await cellLoc.first().click({ timeout: 1500, force: true });
+      return true;
+    } catch { return false; }
   };
 
   // 방법 1: frameLocator
   try {
-    const fl = page.frameLocator(SEL_FEE);
-    if (await executeClick((fn, arg) => fl.locator('body').evaluate(fn, arg))) return;
+    if (await playwrightClick(page.frameLocator(SEL_FEE))) return;
   } catch {}
 
   // 방법 2: 모든 frame
   for (const f of page.frames()) {
     if (f === page.mainFrame()) continue;
     try {
-      if (await executeClick((fn, arg) => f.evaluate(fn, arg))) return;
+      const hasSheetA = await f.evaluate(() => !!document.querySelector('#sheetDivA'));
+      if (!hasSheetA) continue;
+      const fl = page.frameLocator(`iframe[src="${f.url()}"]`);
+      if (await playwrightClick(fl)) return;
     } catch {}
   }
 }
