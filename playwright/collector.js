@@ -75,10 +75,12 @@ async function runCollect(onProgress) {
         await clickFeeUnit(page, unit.dong, unit.ho, i);
         await page.waitForTimeout(600);
 
-        const feeData = await collectFeeData(page);
-        const phone   = residentMap[`${unit.dong}-${unit.ho}`] || '';
+        const feeData  = await collectFeeData(page);
+        const resident = residentMap[`${unit.dong}-${unit.ho}`] || {};
+        const name     = resident.name  || '';
+        const phone    = resident.phone || '';
 
-        allData.push({ dong: unit.dong, ho: unit.ho, phone, ...feeData });
+        allData.push({ dong: unit.dong, ho: unit.ho, name, phone, ...feeData });
       } catch (err) {
         failedUnits.push(unit.dongho);
         saveErrorLog(logsDir, unit.dongho, err.message);
@@ -200,6 +202,25 @@ async function readResidentData(page) {
         .filter(([col]) => col !== dongColId)
         .sort(([,a],[,b]) => b.size - a.size)[0]?.[0] || null;
 
+      // 입주자 이름 컬럼: 한글 포함, 다양한 값
+      // 컬럼 순서 기준으로 첫 번째 한글 다중값 컬럼 (입주자 > 소유주 순서)
+      const RE_KOREAN = /[가-힣]/;
+      const colOrder = Object.keys(sheet.Rows[arAllKeys[0]] || {});
+      const colNameSets = {};
+      for (const rd of sample) {
+        for (const [col, val] of Object.entries(rd)) {
+          const v = String(val || '').trim();
+          if (v && RE_KOREAN.test(v) && v.length <= 20) {
+            colNameSets[col] = colNameSets[col] || new Set();
+            colNameSets[col].add(v);
+          }
+        }
+      }
+      const nameColId = Object.entries(colNameSets)
+        .filter(([col]) => col !== dongColId && col !== hoColId && col !== phoneColId)
+        .filter(([,s]) => s.size >= 3)
+        .sort(([colA],[colB]) => colOrder.indexOf(colA) - colOrder.indexOf(colB))[0]?.[0] || null;
+
       if (dongColId && hoColId) {
         const arKeys = Object.keys(sheet.Rows)
           .filter(k => /^AR\d+$/.test(k))
@@ -211,11 +232,12 @@ async function readResidentData(page) {
           if (!rd) continue;
           const dong  = String(rd[dongColId] || '').trim();
           const ho    = String(rd[hoColId]   || '').trim();
+          const name  = nameColId  ? String(rd[nameColId]  || '').trim() : '';
           const phone = phoneColId ? String(rd[phoneColId] || '').trim() : '';
 
           if (dong && /^\d{1,4}$/.test(dong) && dong !== '합계') lastDong = dong;
           if (ho && /^\d{2,4}$/.test(ho) && ho !== '합계' && lastDong) {
-            map[`${lastDong}-${ho}`] = phone;
+            map[`${lastDong}-${ho}`] = { name, phone };
           }
         }
         if (Object.keys(map).length > 0) return map;
@@ -229,14 +251,15 @@ async function readResidentData(page) {
       if (tds.length < 2) continue;
       const c0 = (tds[0]?.innerText || '').trim().split(/[\t\n]/)[0].replace(/\s+/g, '');
       const c1 = (tds[1]?.innerText || '').trim().split(/[\t\n]/)[0].replace(/\s+/g, '');
+      const name  = (tds[2]?.innerText || '').trim();
       const phone = tds.map(td => (td.innerText||'').trim().replace(/\s+/g,''))
         .find(v => RE_PHONE.test(v)) || '';
 
       if (/^\d{1,4}$/.test(c0) && /^\d{2,4}$/.test(c1)) {
         lastDong = c0;
-        map[`${lastDong}-${c1}`] = phone;
+        map[`${lastDong}-${c1}`] = { name, phone };
       } else if (/^\d{2,4}$/.test(c0) && lastDong) {
-        map[`${lastDong}-${c0}`] = phone;
+        map[`${lastDong}-${c0}`] = { name, phone };
       }
     }
     return map;
