@@ -164,8 +164,10 @@ async function readResidentData(page) {
  * ═══════════════════════════════════════════════════════════ */
 async function readFeeUnitList(page) {
   const fn = () => {
-    // 사업자번호(NNN-NN-NNNNN) 오탐 방지: 뒤에 또 다른 -숫자가 오면 제외
-    const RE = /\b(\d{1,4})\s*[-–—]\s*(\d{2,4})\b(?!\s*[-–—]\s*\d)/;
+    // 전화번호·사업자번호 오탐 방지
+    //  ① 뒤에 또 다른 -숫자 → 사업자번호(NNN-NN-NNNNN) 제외
+    //  ② 앞에 숫자- → 전화번호 중간 그룹(010-2722-0528에서 2722-0528) 제외
+    const RE = /(?<!\d[-–—])\b(\d{1,4})\s*[-–—]\s*(\d{2,4})\b(?!\s*[-–—]\s*\d)/;
 
     function visTds(row) {
       return Array.from(row.querySelectorAll('td')).filter(td => {
@@ -187,7 +189,8 @@ async function readFeeUnitList(page) {
         // N-N 합쳐진 셀 탐색
         for (let ci = 0; ci < Math.min(tds.length, 4); ci++) {
           const m = (tds[ci]?.innerText || '').match(RE);
-          if (m && parseInt(m[1]) >= 1 && parseInt(m[2]) >= 1) {
+          // ho가 0으로 시작하면 전화번호 구성요소 (0528, 0123 등) → 제외
+          if (m && parseInt(m[1]) >= 1 && parseInt(m[2]) >= 1 && !m[2].startsWith('0')) {
             result.push({ dongho: `${m[1]}-${m[2]}`, dong: m[1], ho: m[2] });
             found = true; break;
           }
@@ -196,7 +199,7 @@ async function readFeeUnitList(page) {
         if (!found && tds.length >= 2) {
           const d = (tds[0]?.innerText || '').trim().split(/[\t\n]/)[0].replace(/\s+/g, '');
           const h = (tds[1]?.innerText || '').trim().split(/[\t\n]/)[0].replace(/\s+/g, '');
-          if (/^\d{1,4}$/.test(d) && /^\d{2,4}$/.test(h) && parseInt(h) > 0) {
+          if (/^\d{1,4}$/.test(d) && /^\d{2,4}$/.test(h) && parseInt(h) >= 101 && !h.startsWith('0')) {
             result.push({ dongho: `${d}-${h}`, dong: d, ho: h });
           }
         }
@@ -281,8 +284,10 @@ async function clickFeeUnit(page, dong, ho) {
   const target = `${dong}-${ho}`;
 
   const fn = (t) => {
-    // 사업자번호(NNN-NN-NNNNN) 오탐 방지: 뒤에 또 다른 -숫자가 오면 제외
-    const RE = /\b(\d{1,4})\s*[-–—]\s*(\d{2,4})\b(?!\s*[-–—]\s*\d)/;
+    // 전화번호·사업자번호 오탐 방지
+    //  ① 뒤에 또 다른 -숫자 → 사업자번호(NNN-NN-NNNNN) 제외
+    //  ② 앞에 숫자- → 전화번호 중간 그룹(010-2722-0528에서 2722-0528) 제외
+    const RE = /(?<!\d[-–—])\b(\d{1,4})\s*[-–—]\s*(\d{2,4})\b(?!\s*[-–—]\s*\d)/;
     const [d, h] = t.split('-');
 
     function visTds(row) {
@@ -383,7 +388,8 @@ async function collectFeeData(page) {
         for (let i = 0; i + 1 < cells.length; i += 2) {
           const key = cells[i].innerText.trim();
           const val = txt(cells[i + 1]);
-          if (!key || skipKeys.includes(key)) continue;
+          // 빈 키, 헤더 스킵 키, 비정상 길이(헤더 연결 방지) 제외
+          if (!key || key.length > 30 || skipKeys.includes(key)) continue;
           if (NODATA_MSGS.some(m => val.includes(m))) continue;
           data[prefix ? `${prefix}_${key}` : key] = val;
         }
@@ -415,7 +421,7 @@ async function collectFeeData(page) {
     extractPairs(
       document.querySelector('.cont_table.left.sheetETap'),
       '할인',
-      ['할인항목명', '항목', '순번', '합계', '']
+      ['할인항목명', '항목', '순번', '신청일자', '적용할인금액', '건수', '할인일자', '합계', '']
     );
 
     // ── 항목별 부과 — ID 요약값 ──────────────────────────────
