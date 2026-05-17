@@ -157,87 +157,43 @@ async function readResidentData(page) {
 }
 
 /* ═══════════════════════════════════════════════════════════
- *  관리비조회: 동호 목록 읽기  (.cont_table.left → IBSheet)
+ *  관리비조회: 동호 목록 읽기 — 근본 수정
  *
- *  IBSection 내부 tr.IBDataRow 탐색
- *  N-N 합쳐진 셀 OR 동/호 분리 셀 모두 지원
+ *  N-N 정규식 패턴 매칭 완전 제거.
+ *  XpERP 동호내역 IBSheet 고유 식별자만 직접 사용:
+ *    div#sheetDivA          → 동호내역 IBSheet 컨테이너 (관리비조회 전용)
+ *    td[class*="APT_NO_ROOM"] → 동호 복합값 셀 ("1 - 101" 형태)
+ *
+ *  #sheetDivA 는 관리비조회 frame에만 존재 → 전화번호/사업자번호 오탐 원천 차단
  * ═══════════════════════════════════════════════════════════ */
 async function readFeeUnitList(page) {
   const fn = () => {
-    // 전화번호·사업자번호 오탐 방지
-    //  ① 뒤에 또 다른 -숫자 → 사업자번호(NNN-NN-NNNNN) 제외
-    //  ② 앞에 숫자- → 전화번호 중간 그룹(010-2722-0528에서 2722-0528) 제외
-    const RE = /(?<!\d[-–—])\b(\d{1,4})\s*[-–—]\s*(\d{2,4})\b(?!\s*[-–—]\s*\d)/;
+    const sheetA = document.querySelector('#sheetDivA');
+    if (!sheetA) return [];  // 관리비조회 미로드 → 즉시 빈 배열
 
-    function visTds(row) {
-      return Array.from(row.querySelectorAll('td')).filter(td => {
-        if (td.style.width === '0px' || td.style.width === '0') return false;
-        for (const cls of td.classList) { if (cls.startsWith('HideCol')) return false; }
-        return true;
-      });
+    const result = [];
+    const seen   = new Set();
+    for (const row of sheetA.querySelectorAll('tr.IBDataRow')) {
+      const td   = row.querySelector('[class*="APT_NO_ROOM"]');
+      if (!td) continue;
+      const text = (td.innerText || '').trim();
+      if (!text || text === '전체') continue;
+      // "1 - 101" 또는 "1-101" 파싱 — APT_NO_ROOM 셀 내부만 파싱하므로 오탐 불가
+      const m = text.match(/(\d{1,4})\s*[-–—]\s*(\d{1,4})/);
+      if (!m) continue;
+      const dongho = `${m[1]}-${m[2]}`;
+      if (!seen.has(dongho)) { seen.add(dongho); result.push({ dongho, dong: m[1], ho: m[2] }); }
     }
-    function dedup(arr) {
-      const seen = new Set();
-      return arr.filter(u => seen.has(u.dongho) ? false : (seen.add(u.dongho), true));
-    }
-    function parseRows(rows) {
-      const result = [];
-      for (const row of rows) {
-        const tds = visTds(row);
-        if (!tds.length) continue;
-        let found = false;
-        // N-N 합쳐진 셀 탐색
-        for (let ci = 0; ci < Math.min(tds.length, 4); ci++) {
-          const m = (tds[ci]?.innerText || '').match(RE);
-          // ho가 0으로 시작하면 전화번호 구성요소 (0528, 0123 등) → 제외
-          if (m && parseInt(m[1]) >= 1 && parseInt(m[2]) >= 1 && !m[2].startsWith('0')) {
-            result.push({ dongho: `${m[1]}-${m[2]}`, dong: m[1], ho: m[2] });
-            found = true; break;
-          }
-        }
-        // 분리 셀: tds[0]=동, tds[1]=호
-        if (!found && tds.length >= 2) {
-          const d = (tds[0]?.innerText || '').trim().split(/[\t\n]/)[0].replace(/\s+/g, '');
-          const h = (tds[1]?.innerText || '').trim().split(/[\t\n]/)[0].replace(/\s+/g, '');
-          if (/^\d{1,4}$/.test(d) && /^\d{2,4}$/.test(h) && parseInt(h) >= 101 && !h.startsWith('0')) {
-            result.push({ dongho: `${d}-${h}`, dong: d, ho: h });
-          }
-        }
-      }
-      return result;
-    }
-
-    // .cont_table.left → IBSection tr.IBDataRow
-    const donghoEl = document.querySelector('.cont_table.left');
-    if (donghoEl) {
-      const ibRows = Array.from(donghoEl.querySelectorAll('tr.IBDataRow'));
-      if (ibRows.length) {
-        const units = dedup(parseRows(ibRows));
-        if (units.length) return units;
-      }
-      // fallback: 일반 table tr
-      for (const table of donghoEl.querySelectorAll('table')) {
-        const units = dedup(parseRows(Array.from(table.querySelectorAll('tbody tr, tr'))));
-        if (units.length) return units;
-      }
-    }
-
-    // 최후 fallback: 전체 문서 탐색
-    let best = [], bestCount = 0;
-    for (const table of document.querySelectorAll('table')) {
-      const rows = parseRows(Array.from(table.querySelectorAll('tbody tr, tr')));
-      if (rows.length > bestCount) { bestCount = rows.length; best = rows; }
-    }
-    return dedup(best);
+    return result;
   };
 
-  // 방법 1: frameLocator
+  // 방법 1: frameLocator (SEL_FEE 프레임 내 #sheetDivA)
   try {
     const units = await page.frameLocator(SEL_FEE).locator('body').evaluate(fn);
     if (units.length) return units;
   } catch {}
 
-  // 방법 2: 모든 frame 순회 (진단 포함)
+  // 방법 2: 모든 frame 순회 — #sheetDivA 없는 프레임은 fn이 [] 반환하므로 안전
   const diagLines = [];
   for (const f of page.frames()) {
     if (f === page.mainFrame()) continue;
@@ -245,25 +201,15 @@ async function readFeeUnitList(page) {
     if (url === 'about:blank' || url === 'about:srcdoc') continue;
     const urlShort = url.split('/').pop().substring(0, 30);
     try {
-      const diag = await f.evaluate(() => {
-        const ibRows  = document.querySelectorAll('tr.IBDataRow').length;
-        const tables  = document.querySelectorAll('table').length;
-        const donghoEl = document.querySelector('.cont_table.left');
-        const ibInDH  = donghoEl ? donghoEl.querySelectorAll('tr.IBDataRow').length : 0;
-        return { tables, ibRows, ibInDH };
-      });
-      const sample = await f.evaluate(() => {
-        const el = document.querySelector('.cont_table.left');
-        const rows = el ? Array.from(el.querySelectorAll('tr.IBDataRow')).slice(0, 3) : [];
-        return rows.map(row =>
-          Array.from(row.querySelectorAll('td')).filter(td => {
-            if (td.style.width === '0px') return false;
-            for (const c of td.classList) { if (c.startsWith('HideCol')) return false; }
-            return true;
-          }).slice(0, 3).map(td => (td.innerText || '').substring(0, 12))
-        );
-      }).catch(() => []);
-      diagLines.push(`[${urlShort}:T${diag.tables}:IB${diag.ibRows}:DH${diag.ibInDH}:${JSON.stringify(sample)}]`);
+      const diag = await f.evaluate(() => ({
+        hasSheetA: !!document.querySelector('#sheetDivA'),
+        ibRows: document.querySelector('#sheetDivA')
+          ? document.querySelectorAll('#sheetDivA tr.IBDataRow').length : 0,
+        sample: Array.from(document.querySelectorAll(
+          '#sheetDivA tr.IBDataRow [class*="APT_NO_ROOM"]'
+        )).slice(0, 3).map(td => (td.innerText || '').trim()),
+      }));
+      diagLines.push(`[${urlShort}:sheetA=${diag.hasSheetA}:IB=${diag.ibRows}:${JSON.stringify(diag.sample)}]`);
       const units = await f.evaluate(fn);
       if (units.length) return units;
     } catch (e) {
@@ -275,50 +221,23 @@ async function readFeeUnitList(page) {
 }
 
 /* ═══════════════════════════════════════════════════════════
- *  관리비조회: 특정 호 행 클릭
+ *  관리비조회: 특정 호 행 클릭 — 근본 수정
  *
- *  .cont_table.left → IBSection tr.IBDataRow에서 탐색
- *  동/호 분리 셀 OR N-N 합쳐진 셀 모두 처리
+ *  #sheetDivA [class*="APT_NO_ROOM"] 셀 텍스트로 행 정확히 매칭.
+ *  정규식 패턴 탐색 없음 → 오탐 불가
  * ═══════════════════════════════════════════════════════════ */
 async function clickFeeUnit(page, dong, ho) {
   const target = `${dong}-${ho}`;
 
   const fn = (t) => {
-    // 전화번호·사업자번호 오탐 방지
-    //  ① 뒤에 또 다른 -숫자 → 사업자번호(NNN-NN-NNNNN) 제외
-    //  ② 앞에 숫자- → 전화번호 중간 그룹(010-2722-0528에서 2722-0528) 제외
-    const RE = /(?<!\d[-–—])\b(\d{1,4})\s*[-–—]\s*(\d{2,4})\b(?!\s*[-–—]\s*\d)/;
-    const [d, h] = t.split('-');
-
-    function visTds(row) {
-      return Array.from(row.querySelectorAll('td')).filter(td => {
-        if (td.style.width === '0px' || td.style.width === '0') return false;
-        for (const cls of td.classList) { if (cls.startsWith('HideCol')) return false; }
-        return true;
-      });
-    }
-    function fv(td) {
-      return ((td?.innerText || '').trim().split(/[\t\n]/)[0] || '').replace(/\s+/g, '').trim();
-    }
-
-    const donghoEl = document.querySelector('.cont_table.left');
-    const ibRows   = donghoEl ? Array.from(donghoEl.querySelectorAll('tr.IBDataRow')) : [];
-    const rows     = ibRows.length
-      ? ibRows
-      : Array.from((donghoEl || document).querySelectorAll('tbody tr, tr'));
-
-    for (const row of rows) {
-      const tds = visTds(row);
-      if (!tds.length) continue;
-      const c0 = fv(tds[0]).replace(/[-–—]/g, '-');
-      // N-N 합쳐진 셀
-      if (c0 === t) { row.click(); return true; }
-      const m = c0.match(RE);
-      if (m && `${m[1]}-${m[2]}` === t) { row.click(); return true; }
-      // 동/호 분리 셀
-      if (fv(tds[0]) === d && tds.length >= 2 && fv(tds[1]) === h) {
-        row.click(); return true;
-      }
+    const sheetA = document.querySelector('#sheetDivA');
+    if (!sheetA) return false;
+    for (const row of sheetA.querySelectorAll('tr.IBDataRow')) {
+      const td = row.querySelector('[class*="APT_NO_ROOM"]');
+      if (!td) continue;
+      // "1 - 101" → 공백 제거 + 대시 통일 → "1-101"
+      const text = (td.innerText || '').trim().replace(/\s+/g, '').replace(/[-–—]/g, '-');
+      if (text === t) { row.click(); return true; }
     }
     return false;
   };
@@ -329,7 +248,7 @@ async function clickFeeUnit(page, dong, ho) {
     if (clicked) return;
   } catch {}
 
-  // 방법 2: 모든 frame
+  // 방법 2: 모든 frame (#sheetDivA 없는 프레임은 false 반환으로 안전)
   for (const f of page.frames()) {
     if (f === page.mainFrame()) continue;
     try {
@@ -370,11 +289,10 @@ async function collectFeeData(page) {
         return true;
       });
     }
-    // IBSection tr.IBDataRow 우선, fallback tbody tr
+    // IBDataRow 만 사용 — fallback 제거 (헤더행 오염 차단)
     function dataRows(container) {
       if (!container) return [];
-      const ib = Array.from(container.querySelectorAll('tr.IBDataRow'));
-      return ib.length ? ib : Array.from(container.querySelectorAll('tbody tr'));
+      return Array.from(container.querySelectorAll('tr.IBDataRow'));
     }
     // IBSheet 빈 데이터 안내 메시지 목록
     const NODATA_MSGS = ['조회된 데이터가 없습니다.', '데이터가 없습니다.', '조회결과가 없습니다.'];
