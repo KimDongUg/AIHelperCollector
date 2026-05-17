@@ -106,44 +106,104 @@ async function runCollect(onProgress) {
 
 /* ═══════════════════════════════════════════════════════════
  *  입주자현황: 동/호 → 휴대폰 맵  (.cont_table → IBSheet)
+ *
+ *  관리비조회와 동일하게 IBSheet[n].Rows 내부 메모리 접근으로
+ *  가상 스크롤 우회 → 847행 전체 수집
+ *
+ *  컬럼 ID 자동 탐색:
+ *    DOM 첫 IBDataRow의 HideColXXX 클래스에서 동/호 ID 추출
+ *    전화번호 컬럼: 010/011... 패턴 값 가진 컬럼 자동 탐색
  * ═══════════════════════════════════════════════════════════ */
 async function readResidentData(page) {
   const fn = () => {
-    // IBSheet 숨김 TD 필터 — width:0px 만 제거 (HideColXXX 클래스는 표시 컬럼에도 있음)
-    function visTds(row) {
-      return Array.from(row.querySelectorAll('td')).filter(td => {
-        const w = td.style.width;
-        return w !== '0px' && w !== '0' && td.style.display !== 'none';
-      });
-    }
-    function findPhone(tds) {
-      const RE = /^0[1][0-9][-\s]?\d{3,4}[-\s]?\d{4}$/;
-      for (const td of tds) {
-        const t = (td.innerText || '').trim().replace(/\s+/g, '');
-        if (RE.test(t)) return t;
-      }
-      return tds[9]?.innerText.trim() || tds[8]?.innerText.trim() || '';
-    }
-
     const map = {};
-    const container = document.querySelector('.cont_table');
-    // IBSection 내부 tr.IBDataRow 우선 (이중 IBSheet 구조)
-    const rows = container
-      ? Array.from(container.querySelectorAll('tr.IBDataRow'))
-      : [];
+    const RE_PHONE = /^0[1][0-9][-\s]?\d{3,4}[-\s]?\d{4}$/;
 
+    const container = document.querySelector('.cont_table');
+    if (!container) return map;
+
+    // IBSheet 인스턴스 가져오기
+    const scrollEl = container.querySelector('.IBSectionScroll');
+    const sheetIdx = (() => {
+      const m = (scrollEl?.getAttribute('onscroll') || '').match(/IBSheet\[(\d+)\]/);
+      return m ? parseInt(m[1]) : 0;
+    })();
+    const sheet = window.IBSheet?.[sheetIdx];
+
+    // HideColXXX 클래스에서 컬럼 ID 추출
+    function getColId(td) {
+      for (const cls of td.classList) {
+        if (cls.startsWith('HideCol')) {
+          return cls.slice('HideCol'.length).replace(/^\d+/, '');
+        }
+      }
+      return null;
+    }
+    function visTds(row) {
+      return Array.from(row.querySelectorAll('td'))
+        .filter(td => td.style.width !== '0px' && td.style.width !== '0');
+    }
+
+    // ── 방법 A: IBSheet.Rows 전체 행 접근 ──────────────────
+    if (sheet && sheet.Rows && typeof sheet.Rows === 'object') {
+      // DOM 첫 행에서 동/호 컬럼 ID 탐색
+      const firstRow = container.querySelector('tr.IBDataRow');
+      const sampleTds = firstRow ? visTds(firstRow) : [];
+      const dongColId = sampleTds[0] ? getColId(sampleTds[0]) : null;
+      const hoColId   = sampleTds[1] ? getColId(sampleTds[1]) : null;
+
+      // 전화번호 컬럼 ID: 샘플 30행에서 010... 패턴 찾기
+      let phoneColId = null;
+      const arSample = Object.keys(sheet.Rows)
+        .filter(k => /^AR\d+$/.test(k)).slice(0, 30);
+      for (const key of arSample) {
+        const rd = sheet.Rows[key];
+        if (!rd) continue;
+        for (const [col, val] of Object.entries(rd)) {
+          if (RE_PHONE.test(String(val || '').trim().replace(/\s+/g, ''))) {
+            phoneColId = col; break;
+          }
+        }
+        if (phoneColId) break;
+      }
+
+      if (dongColId && hoColId) {
+        const arKeys = Object.keys(sheet.Rows)
+          .filter(k => /^AR\d+$/.test(k))
+          .sort((a, b) => parseInt(a.slice(2)) - parseInt(b.slice(2)));
+
+        let lastDong = '';
+        for (const key of arKeys) {
+          const rd = sheet.Rows[key];
+          if (!rd) continue;
+          const dong  = String(rd[dongColId] || '').trim();
+          const ho    = String(rd[hoColId]   || '').trim();
+          const phone = phoneColId ? String(rd[phoneColId] || '').trim() : '';
+
+          if (dong && /^\d{1,4}$/.test(dong) && dong !== '합계') lastDong = dong;
+          if (ho && /^\d{2,4}$/.test(ho) && ho !== '합계' && lastDong) {
+            map[`${lastDong}-${ho}`] = phone;
+          }
+        }
+        if (Object.keys(map).length > 0) return map;
+      }
+    }
+
+    // ── 방법 B: DOM visible 행 폴백 (부분 수집) ────────────
     let lastDong = '';
-    for (const row of rows) {
+    for (const row of container.querySelectorAll('tr.IBDataRow')) {
       const tds = visTds(row);
       if (tds.length < 2) continue;
       const c0 = (tds[0]?.innerText || '').trim().split(/[\t\n]/)[0].replace(/\s+/g, '');
       const c1 = (tds[1]?.innerText || '').trim().split(/[\t\n]/)[0].replace(/\s+/g, '');
+      const phone = tds.map(td => (td.innerText||'').trim().replace(/\s+/g,''))
+        .find(v => RE_PHONE.test(v)) || '';
 
       if (/^\d{1,4}$/.test(c0) && /^\d{2,4}$/.test(c1)) {
         lastDong = c0;
-        map[`${lastDong}-${c1}`] = findPhone(tds);
+        map[`${lastDong}-${c1}`] = phone;
       } else if (/^\d{2,4}$/.test(c0) && lastDong) {
-        map[`${lastDong}-${c0}`] = findPhone(tds);
+        map[`${lastDong}-${c0}`] = phone;
       }
     }
     return map;
