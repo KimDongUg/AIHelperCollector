@@ -72,7 +72,7 @@ async function runCollect(onProgress) {
       onProgress({ current: i + 1, total, unit: unit.dongho });
 
       try {
-        await clickFeeUnit(page, unit.dong, unit.ho);
+        await clickFeeUnit(page, unit.dong, unit.ho, i);
         await page.waitForTimeout(400);
 
         const feeData = await collectFeeData(page);
@@ -159,67 +159,93 @@ async function readResidentData(page) {
 /* ═══════════════════════════════════════════════════════════
  *  관리비조회: 동호 목록 읽기
  *
- *  IBSheet 가상 스크롤 우회: IBSheet JavaScript API 직접 호출
- *    IBSheet[n].LastRow()           → 전체 행 수
- *    IBSheet[n].GetCellValue(i, col) → i번째 행의 col 값
- *  → DOM에 렌더된 행(~28개)이 아닌 전체 행(847개+) 일괄 조회
- *
- *  DOM API 폴백: IBSheet API 없을 때 현재 visible 행만 (부분 수집)
+ *  IBSheet 가상 스크롤 우회:
+ *    evaluate 내부에서 Promise + setTimeout으로 IBSectionScroll을
+ *    스크롤하며 모든 APT_NO_ROOM 셀을 수집
+ *    (DOM에 ~28행만 렌더돼도 전체 847행+ 수집 가능)
  * ═══════════════════════════════════════════════════════════ */
 async function readFeeUnitList(page) {
+  // Promise 기반 스크롤 수집 — evaluate 내부에서 완결
   const fn = () => {
     const sheetA = document.querySelector('#sheetDivA');
     if (!sheetA) return [];
 
-    // IBSheet 인스턴스 가져오기 — onscroll 속성에서 인덱스 파싱
     const scrollEl = sheetA.querySelector('.IBSectionScroll');
-    const getSheet = () => {
-      const m = (scrollEl?.getAttribute('onscroll') || '').match(/IBSheet\[(\d+)\]/);
-      return window.IBSheet?.[m ? parseInt(m[1]) : 0];
-    };
 
-    // ── 방법 A: IBSheet API (전체 행, 가상 스크롤 우회) ──────
+    // ── 방법 A: IBSheet API (다양한 메서드명 시도) ───────────
     try {
-      const sheet = getSheet();
-      if (sheet && typeof sheet.LastRow === 'function') {
-        const last = sheet.LastRow();
-        if (last > 0) {
-          const result = [], seen = new Set();
-          for (let i = 1; i <= last; i++) {
-            const v = sheet.GetCellValue(i, 'APT_NO_ROOM');
-            if (!v || v.trim() === '전체') continue;
-            const m = v.trim().match(/(\d{1,4})\s*[-–—]\s*(\d{1,4})/);
-            if (!m) continue;
-            const dongho = `${m[1]}-${m[2]}`;
-            if (!seen.has(dongho)) { seen.add(dongho); result.push({ dongho, dong: m[1], ho: m[2] }); }
+      const m = (scrollEl?.getAttribute('onscroll') || '').match(/IBSheet\[(\d+)\]/);
+      const sheet = window.IBSheet?.[m ? parseInt(m[1]) : 0];
+      if (sheet) {
+        const getLastRow = sheet.LastRow   || sheet.GetRowCount ||
+                           sheet.RowCount  || sheet.AllCount;
+        const getCellVal = sheet.GetCellValue || sheet.GetValue;
+        if (typeof getLastRow === 'function' && typeof getCellVal === 'function') {
+          const last = getLastRow.call(sheet);
+          if (last > 0) {
+            const result = [], seen = new Set();
+            for (let i = 1; i <= last; i++) {
+              const v = getCellVal.call(sheet, i, 'APT_NO_ROOM');
+              if (!v || v.trim() === '전체') continue;
+              const m2 = v.trim().match(/(\d{1,4})\s*[-–—]\s*(\d{1,4})/);
+              if (!m2) continue;
+              const dk = `${m2[1]}-${m2[2]}`;
+              if (!seen.has(dk)) { seen.add(dk); result.push({ dongho: dk, dong: m2[1], ho: m2[2] }); }
+            }
+            if (result.length) return result;
           }
-          if (result.length) return result;
         }
       }
     } catch (e) {}
 
-    // ── 방법 B: DOM APT_NO_ROOM 셀 (visible 행만, API 실패 시 폴백) ──
-    const result = [], seen = new Set();
-    for (const row of sheetA.querySelectorAll('tr.IBDataRow')) {
-      const td = row.querySelector('[class*="APT_NO_ROOM"]');
-      if (!td) continue;
-      const text = (td.innerText || '').trim();
-      if (!text || text === '전체') continue;
-      const m = text.match(/(\d{1,4})\s*[-–—]\s*(\d{1,4})/);
-      if (!m) continue;
-      const dongho = `${m[1]}-${m[2]}`;
-      if (!seen.has(dongho)) { seen.add(dongho); result.push({ dongho, dong: m[1], ho: m[2] }); }
-    }
-    return result;
+    // ── 방법 B: Promise + setTimeout 스크롤 수집 ────────────
+    if (!scrollEl) return [];
+
+    return new Promise((resolve) => {
+      scrollEl.scrollTop = 0;
+      const allUnits = new Map();
+      let stagnantCount = 0;
+
+      const step = () => {
+        const prevSize = allUnits.size;
+
+        for (const row of sheetA.querySelectorAll('tr.IBDataRow')) {
+          const td = row.querySelector('[class*="APT_NO_ROOM"]');
+          if (!td) continue;
+          const text = (td.innerText || '').trim();
+          if (!text || text === '전체') continue;
+          const m = text.match(/(\d{1,4})\s*[-–—]\s*(\d{1,4})/);
+          if (!m) continue;
+          const dk = `${m[1]}-${m[2]}`;
+          if (!allUnits.has(dk)) allUnits.set(dk, { dongho: dk, dong: m[1], ho: m[2] });
+        }
+
+        if (allUnits.size === prevSize) stagnantCount++;
+        else stagnantCount = 0;
+
+        const atBottom =
+          scrollEl.scrollTop + scrollEl.clientHeight >= scrollEl.scrollHeight - 2;
+
+        if (atBottom || stagnantCount >= 3) {
+          resolve(Array.from(allUnits.values()));
+          return;
+        }
+
+        scrollEl.scrollTop += scrollEl.clientHeight;
+        setTimeout(step, 80);
+      };
+
+      setTimeout(step, 80); // 초기 렌더 대기
+    });
   };
 
   // 방법 1: frameLocator
   try {
     const units = await page.frameLocator(SEL_FEE).locator('body').evaluate(fn);
-    if (units.length) return units;
+    if (Array.isArray(units) && units.length) return units;
   } catch {}
 
-  // 방법 2: 모든 frame (#sheetDivA 없으면 [] 반환 → 안전)
+  // 방법 2: 모든 frame
   const diagLines = [];
   for (const f of page.frames()) {
     if (f === page.mainFrame()) continue;
@@ -227,21 +253,11 @@ async function readFeeUnitList(page) {
     if (url === 'about:blank' || url === 'about:srcdoc') continue;
     const urlShort = url.split('/').pop().substring(0, 30);
     try {
-      const diag = await f.evaluate(() => {
-        const sheetA = document.querySelector('#sheetDivA');
-        const scrollEl = sheetA?.querySelector('.IBSectionScroll');
-        const m = (scrollEl?.getAttribute('onscroll') || '').match(/IBSheet\[(\d+)\]/);
-        const sheet = window.IBSheet?.[m ? parseInt(m[1]) : 0];
-        return {
-          hasSheetA: !!sheetA,
-          hasApi: !!(sheet && typeof sheet.LastRow === 'function'),
-          lastRow: (() => { try { return sheet?.LastRow() || 0; } catch(e) { return 0; } })(),
-          ibDomRows: sheetA ? sheetA.querySelectorAll('tr.IBDataRow').length : 0,
-        };
-      });
-      diagLines.push(`[${urlShort}:sheetA=${diag.hasSheetA}:api=${diag.hasApi}:all=${diag.lastRow}:dom=${diag.ibDomRows}]`);
+      const hasSheetA = await f.evaluate(() => !!document.querySelector('#sheetDivA'));
+      if (!hasSheetA) continue;
+      diagLines.push(`[${urlShort}:sheetA=true]`);
       const units = await f.evaluate(fn);
-      if (units.length) return units;
+      if (Array.isArray(units) && units.length) return units;
     } catch (e) {
       diagLines.push(`[${urlShort}:ERR:${e.message.substring(0, 40)}]`);
     }
@@ -253,78 +269,71 @@ async function readFeeUnitList(page) {
 /* ═══════════════════════════════════════════════════════════
  *  관리비조회: 특정 호 행 클릭
  *
- *  IBSheet API로 행 위치 파악 → 스크롤 → 렌더 후 TR 클릭
- *  (가상 스크롤로 DOM에 없는 행도 클릭 가능)
+ *  listIndex(0-based) 기반 scroll → APT_NO_ROOM 셀 스캔 → 클릭
+ *  IBSheet API 가능하면 정확한 위치로 스크롤, 아니면 근사값 사용
  * ═══════════════════════════════════════════════════════════ */
-async function clickFeeUnit(page, dong, ho) {
+async function clickFeeUnit(page, dong, ho, listIndex = 0) {
   const target = `${dong}-${ho}`;
 
-  // Phase 1: 목표 행 탐색 + 스크롤 (rowIndex 반환, 0=직접클릭완료, -1=미발견)
-  const scrollFn = (t) => {
+  // Phase 1: 목표 행 위치로 스크롤 (스크롤만, 클릭 안 함)
+  const scrollFn = (params) => {
+    const { t, li } = params;
     const sheetA = document.querySelector('#sheetDivA');
-    if (!sheetA) return -1;
-
+    if (!sheetA) return false;
     const scrollEl = sheetA.querySelector('.IBSectionScroll');
-    const getSheet = () => {
-      const m = (scrollEl?.getAttribute('onscroll') || '').match(/IBSheet\[(\d+)\]/);
-      return window.IBSheet?.[m ? parseInt(m[1]) : 0];
-    };
+    if (!scrollEl) return false;
 
-    // IBSheet API로 전체 행 탐색
+    // IBSheet API로 정확한 위치 탐색
     try {
-      const sheet = getSheet();
-      if (sheet && typeof sheet.LastRow === 'function') {
-        const last = sheet.LastRow();
-        for (let i = 1; i <= last; i++) {
-          const v = (sheet.GetCellValue(i, 'APT_NO_ROOM') || '').trim()
-            .replace(/\s+/g, '').replace(/[-–—]/g, '-');
-          if (v !== t) continue;
-          // 목표 행이 뷰포트 중앙에 오도록 스크롤
-          if (scrollEl) {
-            const top = Math.max(0, (i - 1) * 20 - Math.floor(scrollEl.clientHeight / 2));
-            scrollEl.scrollTop = top;
-            scrollEl.dispatchEvent(new Event('scroll'));
+      const m = (scrollEl.getAttribute('onscroll') || '').match(/IBSheet\[(\d+)\]/);
+      const sheet = window.IBSheet?.[m ? parseInt(m[1]) : 0];
+      if (sheet) {
+        const getLastRow = sheet.LastRow || sheet.GetRowCount || sheet.RowCount;
+        const getCellVal = sheet.GetCellValue || sheet.GetValue;
+        if (typeof getLastRow === 'function' && typeof getCellVal === 'function') {
+          const last = getLastRow.call(sheet);
+          for (let i = 1; i <= last; i++) {
+            const v = (getCellVal.call(sheet, i, 'APT_NO_ROOM') || '').trim()
+              .replace(/\s+/g, '').replace(/[-–—]/g, '-');
+            if (v !== t) continue;
+            scrollEl.scrollTop = Math.max(0, (i - 1) * 20 - scrollEl.clientHeight / 2);
+            return true;
           }
-          return i; // rowIndex 반환
         }
       }
     } catch (e) {}
 
-    // DOM visible 행 직접 클릭 (폴백)
+    // IBSheet API 없음 → listIndex 기반 근사 위치로 스크롤
+    scrollEl.scrollTop = Math.max(0, li * 20 - scrollEl.clientHeight / 2);
+    return true;
+  };
+
+  // Phase 2: 스크롤 후 APT_NO_ROOM 텍스트로 행 찾아 클릭
+  const clickFn = (t) => {
+    const sheetA = document.querySelector('#sheetDivA');
+    if (!sheetA) return false;
     for (const row of sheetA.querySelectorAll('tr.IBDataRow')) {
       const td = row.querySelector('[class*="APT_NO_ROOM"]');
       if (!td) continue;
       const text = (td.innerText || '').trim().replace(/\s+/g, '').replace(/[-–—]/g, '-');
-      if (text === t) { row.click(); return 0; }
+      if (text === t) { row.click(); return true; }
     }
-    return -1;
-  };
-
-  // Phase 2: 스크롤 후 렌더된 TR 클릭 (rowIndex 기준)
-  const clickFn = (rowIndex) => {
-    const sheetA = document.querySelector('#sheetDivA');
-    if (!sheetA) return false;
-    // IBSheet TR은 index 속성으로 행 번호 식별
-    const tr = sheetA.querySelector(`tr.IBDataRow[index="${rowIndex}"]`);
-    if (tr) { tr.click(); return true; }
-    // idx 속성도 시도 (AR{n} 형식)
-    const tr2 = sheetA.querySelector(`tr.IBDataRow[idx="AR${rowIndex}"]`);
-    if (tr2) { tr2.click(); return true; }
     return false;
   };
 
-  const executeClick = async (evaluateFn) => {
-    const rowIdx = await evaluateFn(scrollFn, target);
-    if (rowIdx === 0) return true;   // 직접 클릭 완료
-    if (rowIdx === -1) return false; // 미발견
-    // IBSheet가 scroll 이벤트 처리 후 DOM 재렌더 대기
-    await page.waitForTimeout(80);
-    return await evaluateFn(clickFn, rowIdx);
+  const executeClick = async (evalFn) => {
+    // 먼저 visible 행에서 직접 시도
+    if (await evalFn(clickFn, target)) return true;
+    // 없으면 스크롤 후 재시도
+    await evalFn(scrollFn, { t: target, li: listIndex });
+    await page.waitForTimeout(100);
+    return await evalFn(clickFn, target);
   };
 
   // 방법 1: frameLocator
   try {
-    if (await executeClick((fn, arg) => page.frameLocator(SEL_FEE).locator('body').evaluate(fn, arg))) return;
+    const fl = page.frameLocator(SEL_FEE);
+    if (await executeClick((fn, arg) => fl.locator('body').evaluate(fn, arg))) return;
   } catch {}
 
   // 방법 2: 모든 frame
