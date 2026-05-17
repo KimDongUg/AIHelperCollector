@@ -73,7 +73,7 @@ async function runCollect(onProgress) {
 
       try {
         await clickFeeUnit(page, unit.dong, unit.ho, i);
-        await page.waitForTimeout(400);
+        await page.waitForTimeout(600);
 
         const feeData = await collectFeeData(page);
         const phone   = residentMap[`${unit.dong}-${unit.ho}`] || '';
@@ -152,11 +152,12 @@ async function readResidentData(page) {
       const dongColId = sampleTds[0] ? getColId(sampleTds[0]) : null;
       const hoColId   = sampleTds[1] ? getColId(sampleTds[1]) : null;
 
-      // 전화번호 컬럼 ID: 샘플 30행에서 010... 패턴 찾기
+      // 전화번호 컬럼 ID 탐색 (3단계)
       let phoneColId = null;
-      const arSample = Object.keys(sheet.Rows)
-        .filter(k => /^AR\d+$/.test(k)).slice(0, 30);
-      for (const key of arSample) {
+
+      // 1단계: 전체 행 스캔으로 010... 패턴 컬럼 탐색
+      const arAllKeys = Object.keys(sheet.Rows).filter(k => /^AR\d+$/.test(k));
+      for (const key of arAllKeys) {
         const rd = sheet.Rows[key];
         if (!rd) continue;
         for (const [col, val] of Object.entries(rd)) {
@@ -165,6 +166,15 @@ async function readResidentData(page) {
           }
         }
         if (phoneColId) break;
+      }
+
+      // 2단계: 컬럼 ID 이름에 HP/MOBILE/CELL 포함된 컬럼
+      if (!phoneColId) {
+        const firstRd = sheet.Rows[arAllKeys[0]] || {};
+        const phoneKeywords = ['HP_NO','HP','MOBILE','MOBILE_NO','CELL','TEL','PHONE'];
+        phoneColId = Object.keys(firstRd).find(k =>
+          phoneKeywords.some(kw => k.toUpperCase().includes(kw))
+        ) || null;
       }
 
       if (dongColId && hoColId) {
@@ -337,7 +347,7 @@ async function readFeeUnitList(page) {
 async function clickFeeUnit(page, dong, ho, listIndex = 0) {
   const target = `${dong}-${ho}`;
 
-  // Phase 1: 목표 행 위치로 스크롤
+  // Phase 1: 목표 행 위치로 스크롤 + dispatchEvent (IBSheet 즉시 재렌더 강제)
   const scrollFn = (params) => {
     const { t, li } = params;
     const sheetA = document.querySelector('#sheetDivA');
@@ -345,29 +355,31 @@ async function clickFeeUnit(page, dong, ho, listIndex = 0) {
     const scrollEl = sheetA.querySelector('.IBSectionScroll');
     if (!scrollEl) return false;
 
-    // IBSheet[n].Rows 에서 AR 키로 행 번호 탐색
+    let newTop = Math.max(0, li * 20 - scrollEl.clientHeight / 2); // 기본값
+
+    // IBSheet.Rows로 정확한 행 위치 탐색
     try {
       const m = (scrollEl.getAttribute('onscroll') || '').match(/IBSheet\[(\d+)\]/);
       const sheet = window.IBSheet?.[m ? parseInt(m[1]) : 0];
       if (sheet && sheet.Rows) {
-        const arKeys = Object.keys(sheet.Rows).filter(k => /^AR\d+$/.test(k));
-        for (const key of arKeys) {
-          const row = sheet.Rows[key];
-          const v = (row?.['APT_NO_ROOM'] || '').trim().replace(/\s+/g,'').replace(/[-–—]/g,'-');
+        for (const key of Object.keys(sheet.Rows)) {
+          if (!/^AR\d+$/.test(key)) continue;
+          const v = (sheet.Rows[key]?.['APT_NO_ROOM'] || '').trim()
+            .replace(/\s+/g,'').replace(/[-–—]/g,'-');
           if (v !== t) continue;
-          const rowIdx = parseInt(key.slice(2));
-          scrollEl.scrollTop = Math.max(0, (rowIdx - 1) * 20 - scrollEl.clientHeight / 2);
-          return true;
+          newTop = Math.max(0, (parseInt(key.slice(2)) - 1) * 20 - scrollEl.clientHeight / 2);
+          break;
         }
       }
     } catch (e) {}
 
-    // 폴백 → listIndex 기반 근사 위치
-    scrollEl.scrollTop = Math.max(0, li * 20 - scrollEl.clientHeight / 2);
+    scrollEl.scrollTop = newTop;
+    // IBSheet ScrolledBody를 즉시(동기적으로) 강제 실행 → DOM 재렌더
+    scrollEl.dispatchEvent(new Event('scroll'));
     return true;
   };
 
-  // Phase 2: 스크롤 후 APT_NO_ROOM 텍스트로 행 찾아 클릭
+  // Phase 2: TD 직접 클릭 (IBSheet SheetClick은 TR이 아닌 TD 대상 필요)
   const clickFn = (t) => {
     const sheetA = document.querySelector('#sheetDivA');
     if (!sheetA) return false;
@@ -375,7 +387,7 @@ async function clickFeeUnit(page, dong, ho, listIndex = 0) {
       const td = row.querySelector('[class*="APT_NO_ROOM"]');
       if (!td) continue;
       const text = (td.innerText || '').trim().replace(/\s+/g, '').replace(/[-–—]/g, '-');
-      if (text === t) { row.click(); return true; }
+      if (text === t) { td.click(); return true; } // TD 클릭
     }
     return false;
   };
