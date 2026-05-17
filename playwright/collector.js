@@ -157,28 +157,54 @@ async function readResidentData(page) {
 }
 
 /* ═══════════════════════════════════════════════════════════
- *  관리비조회: 동호 목록 읽기 — 근본 수정
+ *  관리비조회: 동호 목록 읽기
  *
- *  N-N 정규식 패턴 매칭 완전 제거.
- *  XpERP 동호내역 IBSheet 고유 식별자만 직접 사용:
- *    div#sheetDivA          → 동호내역 IBSheet 컨테이너 (관리비조회 전용)
- *    td[class*="APT_NO_ROOM"] → 동호 복합값 셀 ("1 - 101" 형태)
+ *  IBSheet 가상 스크롤 우회: IBSheet JavaScript API 직접 호출
+ *    IBSheet[n].LastRow()           → 전체 행 수
+ *    IBSheet[n].GetCellValue(i, col) → i번째 행의 col 값
+ *  → DOM에 렌더된 행(~28개)이 아닌 전체 행(847개+) 일괄 조회
  *
- *  #sheetDivA 는 관리비조회 frame에만 존재 → 전화번호/사업자번호 오탐 원천 차단
+ *  DOM API 폴백: IBSheet API 없을 때 현재 visible 행만 (부분 수집)
  * ═══════════════════════════════════════════════════════════ */
 async function readFeeUnitList(page) {
   const fn = () => {
     const sheetA = document.querySelector('#sheetDivA');
-    if (!sheetA) return [];  // 관리비조회 미로드 → 즉시 빈 배열
+    if (!sheetA) return [];
 
-    const result = [];
-    const seen   = new Set();
+    // IBSheet 인스턴스 가져오기 — onscroll 속성에서 인덱스 파싱
+    const scrollEl = sheetA.querySelector('.IBSectionScroll');
+    const getSheet = () => {
+      const m = (scrollEl?.getAttribute('onscroll') || '').match(/IBSheet\[(\d+)\]/);
+      return window.IBSheet?.[m ? parseInt(m[1]) : 0];
+    };
+
+    // ── 방법 A: IBSheet API (전체 행, 가상 스크롤 우회) ──────
+    try {
+      const sheet = getSheet();
+      if (sheet && typeof sheet.LastRow === 'function') {
+        const last = sheet.LastRow();
+        if (last > 0) {
+          const result = [], seen = new Set();
+          for (let i = 1; i <= last; i++) {
+            const v = sheet.GetCellValue(i, 'APT_NO_ROOM');
+            if (!v || v.trim() === '전체') continue;
+            const m = v.trim().match(/(\d{1,4})\s*[-–—]\s*(\d{1,4})/);
+            if (!m) continue;
+            const dongho = `${m[1]}-${m[2]}`;
+            if (!seen.has(dongho)) { seen.add(dongho); result.push({ dongho, dong: m[1], ho: m[2] }); }
+          }
+          if (result.length) return result;
+        }
+      }
+    } catch (e) {}
+
+    // ── 방법 B: DOM APT_NO_ROOM 셀 (visible 행만, API 실패 시 폴백) ──
+    const result = [], seen = new Set();
     for (const row of sheetA.querySelectorAll('tr.IBDataRow')) {
-      const td   = row.querySelector('[class*="APT_NO_ROOM"]');
+      const td = row.querySelector('[class*="APT_NO_ROOM"]');
       if (!td) continue;
       const text = (td.innerText || '').trim();
       if (!text || text === '전체') continue;
-      // "1 - 101" 또는 "1-101" 파싱 — APT_NO_ROOM 셀 내부만 파싱하므로 오탐 불가
       const m = text.match(/(\d{1,4})\s*[-–—]\s*(\d{1,4})/);
       if (!m) continue;
       const dongho = `${m[1]}-${m[2]}`;
@@ -187,13 +213,13 @@ async function readFeeUnitList(page) {
     return result;
   };
 
-  // 방법 1: frameLocator (SEL_FEE 프레임 내 #sheetDivA)
+  // 방법 1: frameLocator
   try {
     const units = await page.frameLocator(SEL_FEE).locator('body').evaluate(fn);
     if (units.length) return units;
   } catch {}
 
-  // 방법 2: 모든 frame 순회 — #sheetDivA 없는 프레임은 fn이 [] 반환하므로 안전
+  // 방법 2: 모든 frame (#sheetDivA 없으면 [] 반환 → 안전)
   const diagLines = [];
   for (const f of page.frames()) {
     if (f === page.mainFrame()) continue;
@@ -201,15 +227,19 @@ async function readFeeUnitList(page) {
     if (url === 'about:blank' || url === 'about:srcdoc') continue;
     const urlShort = url.split('/').pop().substring(0, 30);
     try {
-      const diag = await f.evaluate(() => ({
-        hasSheetA: !!document.querySelector('#sheetDivA'),
-        ibRows: document.querySelector('#sheetDivA')
-          ? document.querySelectorAll('#sheetDivA tr.IBDataRow').length : 0,
-        sample: Array.from(document.querySelectorAll(
-          '#sheetDivA tr.IBDataRow [class*="APT_NO_ROOM"]'
-        )).slice(0, 3).map(td => (td.innerText || '').trim()),
-      }));
-      diagLines.push(`[${urlShort}:sheetA=${diag.hasSheetA}:IB=${diag.ibRows}:${JSON.stringify(diag.sample)}]`);
+      const diag = await f.evaluate(() => {
+        const sheetA = document.querySelector('#sheetDivA');
+        const scrollEl = sheetA?.querySelector('.IBSectionScroll');
+        const m = (scrollEl?.getAttribute('onscroll') || '').match(/IBSheet\[(\d+)\]/);
+        const sheet = window.IBSheet?.[m ? parseInt(m[1]) : 0];
+        return {
+          hasSheetA: !!sheetA,
+          hasApi: !!(sheet && typeof sheet.LastRow === 'function'),
+          lastRow: (() => { try { return sheet?.LastRow() || 0; } catch(e) { return 0; } })(),
+          ibDomRows: sheetA ? sheetA.querySelectorAll('tr.IBDataRow').length : 0,
+        };
+      });
+      diagLines.push(`[${urlShort}:sheetA=${diag.hasSheetA}:api=${diag.hasApi}:all=${diag.lastRow}:dom=${diag.ibDomRows}]`);
       const units = await f.evaluate(fn);
       if (units.length) return units;
     } catch (e) {
@@ -221,39 +251,87 @@ async function readFeeUnitList(page) {
 }
 
 /* ═══════════════════════════════════════════════════════════
- *  관리비조회: 특정 호 행 클릭 — 근본 수정
+ *  관리비조회: 특정 호 행 클릭
  *
- *  #sheetDivA [class*="APT_NO_ROOM"] 셀 텍스트로 행 정확히 매칭.
- *  정규식 패턴 탐색 없음 → 오탐 불가
+ *  IBSheet API로 행 위치 파악 → 스크롤 → 렌더 후 TR 클릭
+ *  (가상 스크롤로 DOM에 없는 행도 클릭 가능)
  * ═══════════════════════════════════════════════════════════ */
 async function clickFeeUnit(page, dong, ho) {
   const target = `${dong}-${ho}`;
 
-  const fn = (t) => {
+  // Phase 1: 목표 행 탐색 + 스크롤 (rowIndex 반환, 0=직접클릭완료, -1=미발견)
+  const scrollFn = (t) => {
     const sheetA = document.querySelector('#sheetDivA');
-    if (!sheetA) return false;
+    if (!sheetA) return -1;
+
+    const scrollEl = sheetA.querySelector('.IBSectionScroll');
+    const getSheet = () => {
+      const m = (scrollEl?.getAttribute('onscroll') || '').match(/IBSheet\[(\d+)\]/);
+      return window.IBSheet?.[m ? parseInt(m[1]) : 0];
+    };
+
+    // IBSheet API로 전체 행 탐색
+    try {
+      const sheet = getSheet();
+      if (sheet && typeof sheet.LastRow === 'function') {
+        const last = sheet.LastRow();
+        for (let i = 1; i <= last; i++) {
+          const v = (sheet.GetCellValue(i, 'APT_NO_ROOM') || '').trim()
+            .replace(/\s+/g, '').replace(/[-–—]/g, '-');
+          if (v !== t) continue;
+          // 목표 행이 뷰포트 중앙에 오도록 스크롤
+          if (scrollEl) {
+            const top = Math.max(0, (i - 1) * 20 - Math.floor(scrollEl.clientHeight / 2));
+            scrollEl.scrollTop = top;
+            scrollEl.dispatchEvent(new Event('scroll'));
+          }
+          return i; // rowIndex 반환
+        }
+      }
+    } catch (e) {}
+
+    // DOM visible 행 직접 클릭 (폴백)
     for (const row of sheetA.querySelectorAll('tr.IBDataRow')) {
       const td = row.querySelector('[class*="APT_NO_ROOM"]');
       if (!td) continue;
-      // "1 - 101" → 공백 제거 + 대시 통일 → "1-101"
       const text = (td.innerText || '').trim().replace(/\s+/g, '').replace(/[-–—]/g, '-');
-      if (text === t) { row.click(); return true; }
+      if (text === t) { row.click(); return 0; }
     }
+    return -1;
+  };
+
+  // Phase 2: 스크롤 후 렌더된 TR 클릭 (rowIndex 기준)
+  const clickFn = (rowIndex) => {
+    const sheetA = document.querySelector('#sheetDivA');
+    if (!sheetA) return false;
+    // IBSheet TR은 index 속성으로 행 번호 식별
+    const tr = sheetA.querySelector(`tr.IBDataRow[index="${rowIndex}"]`);
+    if (tr) { tr.click(); return true; }
+    // idx 속성도 시도 (AR{n} 형식)
+    const tr2 = sheetA.querySelector(`tr.IBDataRow[idx="AR${rowIndex}"]`);
+    if (tr2) { tr2.click(); return true; }
     return false;
+  };
+
+  const executeClick = async (evaluateFn) => {
+    const rowIdx = await evaluateFn(scrollFn, target);
+    if (rowIdx === 0) return true;   // 직접 클릭 완료
+    if (rowIdx === -1) return false; // 미발견
+    // IBSheet가 scroll 이벤트 처리 후 DOM 재렌더 대기
+    await page.waitForTimeout(80);
+    return await evaluateFn(clickFn, rowIdx);
   };
 
   // 방법 1: frameLocator
   try {
-    const clicked = await page.frameLocator(SEL_FEE).locator('body').evaluate(fn, target);
-    if (clicked) return;
+    if (await executeClick((fn, arg) => page.frameLocator(SEL_FEE).locator('body').evaluate(fn, arg))) return;
   } catch {}
 
-  // 방법 2: 모든 frame (#sheetDivA 없는 프레임은 false 반환으로 안전)
+  // 방법 2: 모든 frame
   for (const f of page.frames()) {
     if (f === page.mainFrame()) continue;
     try {
-      const clicked = await f.evaluate(fn, target);
-      if (clicked) return;
+      if (await executeClick((fn, arg) => f.evaluate(fn, arg))) return;
     } catch {}
   }
 }
