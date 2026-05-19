@@ -55,7 +55,7 @@ async function readLblAmt(page) {
 
 // 클릭 후 #lbl_item_amt 값 변경 감지 (50ms 폴링, 최대 maxMs)
 // → AJAX 응답 완료 즉시 다음 단계로 진행
-async function waitForAmt(page, prevValue, maxMs = 2500) {
+async function waitForAmt(page, prevValue, maxMs = 1500) {
   try {
     const f = findFeeFrame(page);
     if (!f) return;
@@ -427,16 +427,17 @@ async function readFeeUnitList(page) {
 /* ═══════════════════════════════════════════════════════════
  *  관리비조회: 특정 호 행 클릭
  *
- *  핵심: element.click() (isTrusted=false, which=0) → IBSheet 무시
- *  해결: Playwright locator.click() → CDP 레벨 실제 마우스 이벤트 (isTrusted=true)
+ *  ⚠️  폴백에서 page.frameLocator('iframe[src="..."]') 사용 시
+ *      프레임 미매칭 → Playwright 기본 30초 타임아웃 발생 (2시간 원인)
+ *      → SEL_FEE frameLocator 단독 사용, 폴백은 f.evaluate() 직접 사용
  *
- *  Phase 1: JS evaluate로 IBSheet 스크롤 (렌더 강제)
- *  Phase 2: Playwright locator.click() 로 신뢰된 클릭 전송
+ *  Phase 1: IBSheet 스크롤 (JS evaluate, dispatchEvent로 즉시 렌더)
+ *  Phase 2: Playwright locator.click() — CDP 실제 마우스 이벤트 (isTrusted=true)
+ *  Phase 3: JS 클릭 폴백 — Frame 객체 직접 evaluate (타임아웃 없음)
  * ═══════════════════════════════════════════════════════════ */
 async function clickFeeUnit(page, dong, ho, listIndex = 0) {
   const target = `${dong}-${ho}`;
 
-  // Phase 1: IBSheet 스크롤 (JS evaluate)
   const scrollFn = (params) => {
     const { t, li } = params;
     const sheetA = document.querySelector('#sheetDivA');
@@ -458,45 +459,41 @@ async function clickFeeUnit(page, dong, ho, listIndex = 0) {
         }
       }
     } catch(e) {}
-
     scrollEl.scrollTop = newTop;
-    scrollEl.dispatchEvent(new Event('scroll')); // IBSheet 재렌더 강제
+    scrollEl.dispatchEvent(new Event('scroll'));
   };
 
-  // Phase 2: Playwright 네이티브 클릭 (CDP 이벤트 → isTrusted=true)
-  const playwrightClick = async (fl) => {
-    try {
-      // 스크롤 먼저 (dispatchEvent로 IBSheet 즉시 재렌더)
-      await fl.locator('body').evaluate(scrollFn, { t: target, li: listIndex });
-      await page.waitForTimeout(60); // 60ms — 브라우저 paint 1~2프레임 여유
+  const fl = page.frameLocator(SEL_FEE);
 
-      // APT_NO_ROOM 셀 중 "N - NNN" 텍스트 매칭 → Playwright 클릭
-      const re = new RegExp(`^\\s*${dong}\\s*[-–—]\\s*${ho}\\s*$`);
-      const cellLoc = fl.locator('#sheetDivA [class*="APT_NO_ROOM"]').filter({ hasText: re });
-
-      const cnt = await cellLoc.count();
-      if (cnt === 0) return false;
-
-      await cellLoc.first().click({ timeout: 1500, force: true });
-      return true;
-    } catch { return false; }
-  };
-
-  // 방법 1: frameLocator
+  // Phase 1: 스크롤
   try {
-    if (await playwrightClick(page.frameLocator(SEL_FEE))) return;
+    await fl.locator('body').evaluate(scrollFn, { t: target, li: listIndex });
+  } catch {}
+  await page.waitForTimeout(60);
+
+  // Phase 2: Playwright 네이티브 클릭 (isTrusted=true, 타임아웃 500ms)
+  try {
+    const re = new RegExp(`^\\s*${dong}\\s*[-–—]\\s*${ho}\\s*$`);
+    const cellLoc = fl.locator('#sheetDivA [class*="APT_NO_ROOM"]').filter({ hasText: re });
+    if (await cellLoc.count() > 0) {
+      await cellLoc.first().click({ timeout: 500, force: true });
+      return;
+    }
   } catch {}
 
-  // 방법 2: 모든 frame
-  for (const f of page.frames()) {
-    if (f === page.mainFrame()) continue;
-    try {
-      const hasSheetA = await f.evaluate(() => !!document.querySelector('#sheetDivA'));
-      if (!hasSheetA) continue;
-      const fl = page.frameLocator(`iframe[src="${f.url()}"]`);
-      if (await playwrightClick(fl)) return;
-    } catch {}
-  }
+  // Phase 3: JS 클릭 폴백 — SEL_FEE frame 직접 evaluate (타임아웃 없음)
+  try {
+    await fl.locator('body').evaluate((t) => {
+      const sheetA = document.querySelector('#sheetDivA');
+      for (const row of (sheetA?.querySelectorAll('tr.IBDataRow') || [])) {
+        const td = row.querySelector('[class*="APT_NO_ROOM"]');
+        if (td && (td.innerText||'').trim().replace(/\s+/g,'').replace(/[-–—]/g,'-') === t) {
+          td.click();
+          return;
+        }
+      }
+    }, target);
+  } catch {}
 }
 
 /* ═══════════════════════════════════════════════════════════
