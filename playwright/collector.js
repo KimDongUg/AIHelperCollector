@@ -32,6 +32,45 @@ function stopCollect() { stopFlag = true; }
 
 const SEL_FEE      = 'iframe[src*="703m01"], iframe[src*="010m01"], iframe[src*="OCCP1010"]';
 const SEL_RESIDENT = 'iframe[src*="020m02"], iframe[src*="020m"], iframe[src*="IMPO2020"]';
+const SEL_FEE_RE   = /703m01|010m01|OCCP1010/;
+
+/* ── 속도 최적화 헬퍼 ────────────────────────────────────────
+ *  관리비조회 frame 직접 접근으로 waitForFunction 사용
+ *  (page.frameLocator() 는 매번 frame 탐색 오버헤드 발생)
+ * ──────────────────────────────────────────────────────────── */
+function findFeeFrame(page) {
+  return page.frames().find(f => SEL_FEE_RE.test(f.url())) || null;
+}
+
+// 클릭 전 #lbl_item_amt 현재 값 읽기
+async function readLblAmt(page) {
+  try {
+    const f = findFeeFrame(page);
+    if (!f) return '';
+    return await f.evaluate(() =>
+      (document.querySelector('#lbl_item_amt')?.innerText || '').replace(/,/g, '').trim()
+    );
+  } catch { return ''; }
+}
+
+// 클릭 후 #lbl_item_amt 값 변경 감지 (50ms 폴링, 최대 maxMs)
+// → AJAX 응답 완료 즉시 다음 단계로 진행
+async function waitForAmt(page, prevValue, maxMs = 2500) {
+  try {
+    const f = findFeeFrame(page);
+    if (!f) return;
+    await f.waitForFunction(
+      ([sel, prev]) => {
+        const el = document.querySelector(sel);
+        if (!el) return true;
+        const curr = (el.innerText || '').replace(/,/g, '').trim();
+        return curr !== prev && curr !== '';
+      },
+      ['#lbl_item_amt', prevValue],
+      { timeout: maxMs, polling: 50 }
+    );
+  } catch {} // timeout(같은 값인 세대) 시 그냥 진행
+}
 
 /* ═══════════════════════════════════════════════════════════
  *  MAIN
@@ -72,21 +111,22 @@ async function runCollect(onProgress) {
       onProgress({ current: i + 1, total, unit: unit.dongho });
 
       try {
+        const prevAmt = await readLblAmt(page);          // 클릭 전 값 기억
         await clickFeeUnit(page, unit.dong, unit.ho, i);
-        await page.waitForTimeout(600);
+        await waitForAmt(page, prevAmt);                 // 값 변경 감지 (최대 2.5s)
 
         const feeData  = await collectFeeData(page);
         const resident = residentMap[`${unit.dong}-${unit.ho}`] || {};
-        const name     = resident.name  || '';
-        const phone    = resident.phone || '';
 
-        allData.push({ dong: unit.dong, ho: unit.ho, name, phone, ...feeData });
+        allData.push({
+          dong: unit.dong, ho: unit.ho,
+          name: resident.name || '', phone: resident.phone || '',
+          ...feeData,
+        });
       } catch (err) {
         failedUnits.push(unit.dongho);
         saveErrorLog(logsDir, unit.dongho, err.message);
       }
-
-      await page.waitForTimeout(100);
     }
 
     if (!allData.length) {
@@ -426,9 +466,9 @@ async function clickFeeUnit(page, dong, ho, listIndex = 0) {
   // Phase 2: Playwright 네이티브 클릭 (CDP 이벤트 → isTrusted=true)
   const playwrightClick = async (fl) => {
     try {
-      // 스크롤 먼저
+      // 스크롤 먼저 (dispatchEvent로 IBSheet 즉시 재렌더)
       await fl.locator('body').evaluate(scrollFn, { t: target, li: listIndex });
-      await page.waitForTimeout(150);
+      await page.waitForTimeout(60); // 60ms — 브라우저 paint 1~2프레임 여유
 
       // APT_NO_ROOM 셀 중 "N - NNN" 텍스트 매칭 → Playwright 클릭
       const re = new RegExp(`^\\s*${dong}\\s*[-–—]\\s*${ho}\\s*$`);
