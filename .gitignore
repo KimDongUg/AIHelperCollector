@@ -3,3 +3,4 @@ dist/
 output/
 logs/
 .env
+.claude/settings.local.json

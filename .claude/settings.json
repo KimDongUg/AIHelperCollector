@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell -NonInteractive -Command \"$ctx = 'MEMORY SAVE REMINDER: Before finishing, check if anything new was learned this session (new IBSheet discoveries, bug patterns, deployment issues, user feedback/corrections, code decisions). If yes, update the relevant memory file at C:\\\\Users\\\\USER\\\\.claude\\\\projects\\\\D--MyProject-AIHelperCollector\\\\memory\\\\ or CLAUDE.md. If nothing new was learned, just say ok and finish.'; ($ctx | ConvertTo-Json) -replace '^\\\"|\\\"$', '' | Out-Null; Write-Output (@{hookSpecificOutput=@{hookEventName='Stop';additionalContext=$ctx}} | ConvertTo-Json -Compress); exit 2\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
