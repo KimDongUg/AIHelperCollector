@@ -478,34 +478,49 @@ async function clickFeeUnit(page, dong, ho, listIndex = 0) {
   try {
     await fl.locator('body').evaluate(scrollFn, { t: target, li: listIndex });
   } catch {}
-  // IBSheet DOM 재렌더 대기: 60ms → 150ms
-  // (count()를 제거하고 Playwright 자체 대기를 사용하므로 충분한 사전 여유 필요)
-  await page.waitForTimeout(150);
+  await page.waitForTimeout(200);
 
-  // Phase 2: Playwright 네이티브 클릭 (isTrusted=true)
-  // ⚠️ count() 가드 제거: count()는 즉시 평가되어 IBSheet 렌더 전 0을 반환 →
-  //    Phase 3 폴백(isTrusted=false)으로 빠져 IBSheet SheetClick 무시됨.
-  //    대신 locator.click()에 timeout 부여 → Playwright가 DOM 등장까지 최대 2s 대기.
+  // Phase 2: evaluate로 셀 직접 탐색 → data 속성 마킹 → Playwright CDP 클릭
+  // ⚠️ hasText 필터 방식은 공백·특수문자 정규화 불일치로 실패 가능.
+  //    evaluate 내부 JS로 innerText를 직접 비교 후 data-pw-target 속성을 마킹,
+  //    Playwright는 해당 속성으로 클릭 → text matching 문제 완전 우회.
   try {
-    const re = new RegExp(`^\\s*${dong}\\s*[-–—]\\s*${ho}\\s*$`);
-    const cellLoc = fl.locator('#sheetDivA [class*="APT_NO_ROOM"]').filter({ hasText: re });
-    await cellLoc.first().click({ timeout: 2000, force: true });
-    return;
+    const marked = await fl.locator('body').evaluate(([d, h]) => {
+      const normalize = (s) => (s || '')
+        .replace(/\xa0/g, ' ').replace(/\s+/g, ' ').trim()
+        .replace(/[–—]/g, '-');
+      const candidates = [`${d} - ${h}`, `${d}-${h}`, `${d}  -  ${h}`];
+      const sheetA = document.querySelector('#sheetDivA');
+      if (!sheetA) return false;
+      for (const row of sheetA.querySelectorAll('tr.IBDataRow')) {
+        const td = row.querySelector('[class*="APT_NO_ROOM"]');
+        if (!td) continue;
+        const txt = normalize(td.innerText || td.textContent);
+        if (candidates.includes(txt)) {
+          td.setAttribute('data-pw-target', '1');
+          return true;
+        }
+      }
+      return false;
+    }, [dong, ho]);
+
+    if (marked) {
+      await fl.locator('[data-pw-target="1"]').click({ force: true, timeout: 1000 });
+      await fl.locator('[data-pw-target="1"]').evaluate(el => el.removeAttribute('data-pw-target'));
+      return;
+    }
   } catch {}
 
-  // Phase 3: JS 클릭 폴백 — isTrusted=false 이므로 IBSheet SheetClick은 무시되나
-  //           일부 구버전 IBSheet나 커스텀 핸들러는 반응할 수 있어 최후 시도로 유지
+  // Phase 3: JS 클릭 폴백 (isTrusted=false — IBSheet SheetClick 무시될 수 있음)
   try {
     await fl.locator('body').evaluate((t) => {
+      const norm = (s) => (s||'').replace(/\xa0/g,' ').replace(/\s+/g,' ').trim().replace(/[–—]/g,'-');
       const sheetA = document.querySelector('#sheetDivA');
       for (const row of (sheetA?.querySelectorAll('tr.IBDataRow') || [])) {
         const td = row.querySelector('[class*="APT_NO_ROOM"]');
-        if (td && (td.innerText||'').trim().replace(/\s+/g,'').replace(/[-–—]/g,'-') === t) {
-          td.click();
-          return;
-        }
+        if (td && norm(td.innerText) === t) { td.click(); return; }
       }
-    }, target);
+    }, `${dong} - ${ho}`);
   } catch {}
 }
 
