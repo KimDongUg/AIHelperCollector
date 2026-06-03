@@ -472,28 +472,25 @@ async function clickFeeUnit(page, dong, ho, listIndex = 0) {
     scrollEl.dispatchEvent(new Event('scroll'));
   };
 
-  const fl = page.frameLocator(SEL_FEE);
+  // page.frameLocator()는 직접 자식 iframe만 탐색 → 중첩 iframe 탐색 실패.
+  // findFeeFrame()은 page.frames() (전체 재귀 목록)로 탐색 → 중첩 구조에서도 동작.
+  const feeFrame = findFeeFrame(page);
+  if (!feeFrame) return;
 
   // Phase 1: 스크롤
   try {
-    await fl.locator('body').evaluate(scrollFn, { t: target, li: listIndex });
+    await feeFrame.evaluate(scrollFn, { t: target, li: listIndex });
   } catch {}
   await page.waitForTimeout(200);
 
-  // Phase 2: evaluate로 셀 직접 탐색 → data 속성 마킹 → Playwright CDP 클릭
-  // ⚠️ hasText 필터 방식은 공백·특수문자 정규화 불일치로 실패 가능.
-  //    evaluate 내부 JS로 innerText를 직접 비교 후 data-pw-target 속성을 마킹,
-  //    Playwright는 해당 속성으로 클릭 → text matching 문제 완전 우회.
+  // Phase 2: evaluate로 APT_NO_ROOM 셀 직접 탐색 → data 속성 마킹 → Playwright CDP 클릭
   try {
-    const marked = await fl.locator('body').evaluate(([d, h]) => {
+    const marked = await feeFrame.evaluate(([d, h]) => {
       const normalize = (s) => (s || '')
         .replace(/\xa0/g, ' ').replace(/\s+/g, ' ').trim()
         .replace(/[–—]/g, '-');
       const candidates = [`${d} - ${h}`, `${d}-${h}`, `${d}  -  ${h}`];
-      // tr.IBDataRow 구조 우회: APT_NO_ROOM 클래스 셀을 직접 전체 탐색
-      // (XpERP 업데이트로 tr 클래스명이 변경됐을 경우에도 동작)
-      const cells = document.querySelectorAll('#sheetDivA [class*="APT_NO_ROOM"]');
-      for (const td of cells) {
+      for (const td of document.querySelectorAll('#sheetDivA [class*="APT_NO_ROOM"]')) {
         const txt = normalize(td.innerText || td.textContent);
         if (candidates.includes(txt)) {
           td.setAttribute('data-pw-target', '1');
@@ -504,15 +501,15 @@ async function clickFeeUnit(page, dong, ho, listIndex = 0) {
     }, [dong, ho]);
 
     if (marked) {
-      await fl.locator('[data-pw-target="1"]').click({ force: true, timeout: 1000 });
-      await fl.locator('[data-pw-target="1"]').evaluate(el => el.removeAttribute('data-pw-target'));
+      await feeFrame.locator('[data-pw-target="1"]').click({ force: true, timeout: 1000 });
+      await feeFrame.locator('[data-pw-target="1"]').evaluate(el => el.removeAttribute('data-pw-target'));
       return;
     }
   } catch {}
 
   // Phase 3: JS 클릭 폴백 (isTrusted=false — IBSheet SheetClick 무시될 수 있음)
   try {
-    await fl.locator('body').evaluate((t) => {
+    await feeFrame.evaluate((t) => {
       const norm = (s) => (s||'').replace(/\xa0/g,' ').replace(/\s+/g,' ').trim().replace(/[–—]/g,'-');
       for (const td of document.querySelectorAll('#sheetDivA [class*="APT_NO_ROOM"]')) {
         if (norm(td.innerText) === t) { td.click(); return; }
