@@ -490,11 +490,10 @@ async function clickFeeUnit(page, dong, ho, listIndex = 0) {
         .replace(/\xa0/g, ' ').replace(/\s+/g, ' ').trim()
         .replace(/[–—]/g, '-');
       const candidates = [`${d} - ${h}`, `${d}-${h}`, `${d}  -  ${h}`];
-      const sheetA = document.querySelector('#sheetDivA');
-      if (!sheetA) return false;
-      for (const row of sheetA.querySelectorAll('tr.IBDataRow')) {
-        const td = row.querySelector('[class*="APT_NO_ROOM"]');
-        if (!td) continue;
+      // tr.IBDataRow 구조 우회: APT_NO_ROOM 클래스 셀을 직접 전체 탐색
+      // (XpERP 업데이트로 tr 클래스명이 변경됐을 경우에도 동작)
+      const cells = document.querySelectorAll('#sheetDivA [class*="APT_NO_ROOM"]');
+      for (const td of cells) {
         const txt = normalize(td.innerText || td.textContent);
         if (candidates.includes(txt)) {
           td.setAttribute('data-pw-target', '1');
@@ -515,10 +514,8 @@ async function clickFeeUnit(page, dong, ho, listIndex = 0) {
   try {
     await fl.locator('body').evaluate((t) => {
       const norm = (s) => (s||'').replace(/\xa0/g,' ').replace(/\s+/g,' ').trim().replace(/[–—]/g,'-');
-      const sheetA = document.querySelector('#sheetDivA');
-      for (const row of (sheetA?.querySelectorAll('tr.IBDataRow') || [])) {
-        const td = row.querySelector('[class*="APT_NO_ROOM"]');
-        if (td && norm(td.innerText) === t) { td.click(); return; }
+      for (const td of document.querySelectorAll('#sheetDivA [class*="APT_NO_ROOM"]')) {
+        if (norm(td.innerText) === t) { td.click(); return; }
       }
     }, `${dong} - ${ho}`);
   } catch {}
