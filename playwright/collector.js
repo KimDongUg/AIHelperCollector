@@ -55,7 +55,7 @@ async function readLblAmt(page) {
 
 // 클릭 후 #lbl_item_amt 값 변경 감지 (50ms 폴링, 최대 maxMs)
 // → AJAX 응답 완료 즉시 다음 단계로 진행
-async function waitForAmt(page, prevValue, maxMs = 1500) {
+async function waitForAmt(page, prevValue, maxMs = 2500) {
   try {
     const f = findFeeFrame(page);
     if (!f) return;
@@ -120,7 +120,8 @@ async function runCollect(onProgress) {
 
         allData.push({
           dong: unit.dong, ho: unit.ho,
-          name: resident.name || '', phone: resident.phone || '',
+          name: resident.name || unit.name || '',
+          phone: resident.phone || '',
           ...feeData,
         });
       } catch (err) {
@@ -350,7 +351,15 @@ async function readFeeUnitList(page) {
             const m2 = String(v).trim().match(/(\d{1,4})\s*[-–—]\s*(\d{1,4})/);
             if (!m2) continue;
             const dk = `${m2[1]}-${m2[2]}`;
-            if (!seen.has(dk)) { seen.add(dk); result.push({ dongho: dk, dong: m2[1], ho: m2[2] }); }
+            if (!seen.has(dk)) {
+              seen.add(dk);
+              result.push({
+                dongho: dk,
+                dong: m2[1],
+                ho: m2[2],
+                name: String(row['HSHL_HEAD_NM'] || '').trim(),
+              });
+            }
           }
           if (result.length) return result;
         }
@@ -469,19 +478,23 @@ async function clickFeeUnit(page, dong, ho, listIndex = 0) {
   try {
     await fl.locator('body').evaluate(scrollFn, { t: target, li: listIndex });
   } catch {}
-  await page.waitForTimeout(60);
+  // IBSheet DOM 재렌더 대기: 60ms → 150ms
+  // (count()를 제거하고 Playwright 자체 대기를 사용하므로 충분한 사전 여유 필요)
+  await page.waitForTimeout(150);
 
-  // Phase 2: Playwright 네이티브 클릭 (isTrusted=true, 타임아웃 500ms)
+  // Phase 2: Playwright 네이티브 클릭 (isTrusted=true)
+  // ⚠️ count() 가드 제거: count()는 즉시 평가되어 IBSheet 렌더 전 0을 반환 →
+  //    Phase 3 폴백(isTrusted=false)으로 빠져 IBSheet SheetClick 무시됨.
+  //    대신 locator.click()에 timeout 부여 → Playwright가 DOM 등장까지 최대 2s 대기.
   try {
     const re = new RegExp(`^\\s*${dong}\\s*[-–—]\\s*${ho}\\s*$`);
     const cellLoc = fl.locator('#sheetDivA [class*="APT_NO_ROOM"]').filter({ hasText: re });
-    if (await cellLoc.count() > 0) {
-      await cellLoc.first().click({ timeout: 500, force: true });
-      return;
-    }
+    await cellLoc.first().click({ timeout: 2000, force: true });
+    return;
   } catch {}
 
-  // Phase 3: JS 클릭 폴백 — SEL_FEE frame 직접 evaluate (타임아웃 없음)
+  // Phase 3: JS 클릭 폴백 — isTrusted=false 이므로 IBSheet SheetClick은 무시되나
+  //           일부 구버전 IBSheet나 커스텀 핸들러는 반응할 수 있어 최후 시도로 유지
   try {
     await fl.locator('body').evaluate((t) => {
       const sheetA = document.querySelector('#sheetDivA');
