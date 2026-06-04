@@ -483,26 +483,55 @@ async function clickFeeUnit(page, dong, ho, listIndex = 0) {
   } catch {}
   await page.waitForTimeout(200);
 
-  // Phase 2: evaluate로 APT_NO_ROOM 셀 직접 탐색 → data 속성 마킹 → Playwright CDP 클릭
+  // Phase 2: iframe 체인 순회로 절대 좌표 계산 → page.mouse.click()
+  // feeFrame.locator().click()은 중첩 iframe에서 좌표 계산이 어긋날 수 있음.
+  // iframe 체인을 직접 올라가며 부모 offset을 합산 → page.mouse.click(absX, absY)로
+  // CDP 최상위 뷰포트 기준 정확한 좌표로 클릭.
   try {
-    const marked = await feeFrame.evaluate(([d, h]) => {
+    const absCoords = await feeFrame.evaluate(([d, h]) => {
       const normalize = (s) => (s || '')
-        .replace(/\xa0/g, ' ').replace(/\s+/g, ' ').trim()
-        .replace(/[–—]/g, '-');
+        .replace(/\xa0/g, ' ').replace(/\s+/g, ' ').trim().replace(/[–—]/g, '-');
       const candidates = [`${d} - ${h}`, `${d}-${h}`, `${d}  -  ${h}`];
+      let targetEl = null;
       for (const td of document.querySelectorAll('#sheetDivA [class*="APT_NO_ROOM"]')) {
-        const txt = normalize(td.innerText || td.textContent);
-        if (candidates.includes(txt)) {
-          td.setAttribute('data-pw-target', '1');
-          return true;
+        if (candidates.includes(normalize(td.innerText || td.textContent))) {
+          targetEl = td; break;
         }
       }
-      return false;
+      if (!targetEl) return null;
+
+      const rect = targetEl.getBoundingClientRect();
+      let x = rect.left + rect.width / 2;
+      let y = rect.top + rect.height / 2;
+
+      // 부모 iframe 체인 순회하며 뷰포트 절대 좌표로 변환
+      let win = window;
+      let depth = 0;
+      while (win !== win.top && depth < 10) {
+        depth++;
+        const parent = win.parent;
+        let found = false;
+        try {
+          for (const iframe of parent.document.querySelectorAll('iframe')) {
+            try {
+              if (iframe.contentWindow === win) {
+                const iRect = iframe.getBoundingClientRect();
+                x += iRect.left;
+                y += iRect.top;
+                win = parent;
+                found = true;
+                break;
+              }
+            } catch (e) {}
+          }
+        } catch (e) {}
+        if (!found) break;
+      }
+      return { x, y };
     }, [dong, ho]);
 
-    if (marked) {
-      await feeFrame.locator('[data-pw-target="1"]').click({ force: true, timeout: 1000 });
-      await feeFrame.locator('[data-pw-target="1"]').evaluate(el => el.removeAttribute('data-pw-target'));
+    if (absCoords) {
+      await page.mouse.click(absCoords.x, absCoords.y);
       return;
     }
   } catch {}
