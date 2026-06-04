@@ -323,8 +323,12 @@ async function readResidentData(page) {
     return map;
   };
 
+  // frameLocator()는 직계 자식만 탐색 → 중첩 iframe 실패.
+  // findFeeFrame과 동일하게 page.frames()로 전체 탐색.
+  const resFrame = page.frames().find(f => /occp_020m02/.test(f.url()));
+  if (!resFrame) return {};
   try {
-    return await page.frameLocator(SEL_RESIDENT).locator('body').evaluate(fn);
+    return await resFrame.evaluate(fn);
   } catch {
     return {};
   }
@@ -605,15 +609,24 @@ async function collectFeeData(page) {
     return data;
   };
 
-  // 방법 1: frameLocator
-  try {
-    const d = await page.frameLocator(SEL_FEE).locator('body').evaluate(fn);
-    if (Object.keys(d).length > 0) return d;
-  } catch {}
+  // 방법 1: findFeeFrame + 고지내역 로드 대기
+  // frameLocator()는 직계 자식만 탐색 → 중첩 iframe 실패.
+  // 고지내역 div_1 AJAX(~307ms)가 div_55(~218ms)보다 늦게 완료되므로 명시적 대기.
+  const feeFrame = findFeeFrame(page);
+  if (feeFrame) {
+    await feeFrame.waitForFunction(() => {
+      const t = document.querySelector('.cont_table.left.mgR5:not(.show0)');
+      return !t || t.querySelectorAll('tr').length >= 2;
+    }, { timeout: 2000 }).catch(() => {});
+    try {
+      const d = await feeFrame.evaluate(fn);
+      if (Object.keys(d).length > 0) return d;
+    } catch {}
+  }
 
-  // 방법 2: 모든 frame 순회
+  // 방법 2: 모든 frame 순회 (폴백)
   for (const f of page.frames()) {
-    if (f === page.mainFrame()) continue;
+    if (f === page.mainFrame() || f === feeFrame) continue;
     try {
       const d = await f.evaluate(fn);
       if (Object.keys(d).length > 0) return d;
