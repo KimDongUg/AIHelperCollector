@@ -445,79 +445,31 @@ async function readFeeUnitList(page) {
  *  Phase 3: JS 클릭 폴백 — Frame 객체 직접 evaluate (타임아웃 없음)
  * ═══════════════════════════════════════════════════════════ */
 async function clickFeeUnit(page, dong, ho, listIndex = 0) {
-  const target = `${dong}-${ho}`;
-
-  const scrollFn = (params) => {
-    const { t, li } = params;
-    const sheetA = document.querySelector('#sheetDivA');
-    const scrollEl = sheetA?.querySelector('.IBSectionScroll');
-    if (!scrollEl) return;
-
-    let newTop = Math.max(0, li * 20 - scrollEl.clientHeight / 2);
-    try {
-      const m = (scrollEl.getAttribute('onscroll') || '').match(/IBSheet\[(\d+)\]/);
-      const sheet = window.IBSheet?.[m ? parseInt(m[1]) : 0];
-      if (sheet?.Rows) {
-        for (const key of Object.keys(sheet.Rows)) {
-          if (!/^AR\d+$/.test(key)) continue;
-          const v = (sheet.Rows[key]?.['APT_NO_ROOM'] || '').trim()
-            .replace(/\s+/g,'').replace(/[-–—]/g,'-');
-          if (v !== t) continue;
-          newTop = Math.max(0, (parseInt(key.slice(2)) - 1) * 20 - scrollEl.clientHeight / 2);
-          break;
-        }
-      }
-    } catch(e) {}
-    scrollEl.scrollTop = newTop;
-    scrollEl.dispatchEvent(new Event('scroll'));
-  };
-
-  // page.frameLocator()는 직접 자식 iframe만 탐색 → 중첩 iframe 탐색 실패.
-  // findFeeFrame()은 page.frames() (전체 재귀 목록)로 탐색 → 중첩 구조에서도 동작.
+  // IBSheet가 ArrowDown 키보드 이벤트에 반응함을 확인 (2026-06-04).
+  // page.keyboard.press()는 CDP Input.dispatchKeyEvent → isTrusted=true.
+  // 마우스 클릭(iframe 좌표 계산 불필요)을 완전히 대체.
   const feeFrame = findFeeFrame(page);
   if (!feeFrame) return;
 
-  // Phase 1: 스크롤
+  // feeFrame document에 키보드 포커스 설정
   try {
-    await feeFrame.evaluate(scrollFn, { t: target, li: listIndex });
-  } catch {}
-  await page.waitForTimeout(300);
-
-  // Phase 2: evaluate로 셀 마킹 → boundingBox() + page.mouse.click()
-  // boundingBox()는 Playwright CDP 내부 연산 → page 뷰포트 기준 절대좌표 (cross-origin 없음)
-  // page.mouse.click()은 CDP Input.dispatchMouseEvent → isTrusted=true
-  // 브라우저가 중첩 iframe까지 이벤트 자동 라우팅 → IBSheet 컨테이너 리스너 정상 도달
-  try {
-    const marked = await feeFrame.evaluate(([d, h]) => {
-      const norm = s => (s||'').replace(/\xa0/g,' ').replace(/\s+/g,' ').trim().replace(/[–—]/g,'-');
-      const candidates = [`${d} - ${h}`, `${d}-${h}`, `${d}  -  ${h}`];
-      document.querySelectorAll('[data-pw-click]').forEach(el => el.removeAttribute('data-pw-click'));
-      for (const td of document.querySelectorAll('#sheetDivA [class*="APT_NO_ROOM"]')) {
-        if (candidates.includes(norm(td.innerText || td.textContent))) {
-          td.setAttribute('data-pw-click', '1');
-          return true;
-        }
-      }
-      return false;
-    }, [dong, ho]);
-    if (marked) {
-      const box = await feeFrame.locator('[data-pw-click="1"]').boundingBox();
-      if (box) {
-        await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-        return;
-      }
-    }
+    await feeFrame.evaluate(() => {
+      const cell = document.querySelector('.IBCellFocusedCell')
+                || document.querySelector('#sheetDivA');
+      if (cell) { cell.tabIndex = -1; cell.focus(); }
+      else { document.body.tabIndex = -1; document.body.focus(); }
+    });
   } catch {}
 
-  // Phase 3: JS 클릭 폴백 (isTrusted=false — IBSheet SheetClick 무시될 수 있음)
-  try {
-    await feeFrame.evaluate((t) => {
-      const norm = (s) => (s||'').replace(/\xa0/g,' ').replace(/\s+/g,' ').trim().replace(/[–—]/g,'-');
-      for (const td of document.querySelectorAll('#sheetDivA [class*="APT_NO_ROOM"]')) {
-        if (norm(td.innerText) === t) { td.click(); return; }
-      }
-    }, `${dong} - ${ho}`);
-  } catch {}
+  await page.waitForTimeout(50);
+
+  if (listIndex === 0) {
+    // 첫 행: Home 키로 IBSheet 첫 행(1-101) 선택
+    await page.keyboard.press('Home');
+  } else {
+    // 이후 행: ArrowDown으로 순차 이동
+    await page.keyboard.press('ArrowDown');
+  }
 }
 
 /* ═══════════════════════════════════════════════════════════
