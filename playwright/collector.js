@@ -55,7 +55,9 @@ async function readLblAmt(page) {
 
 // 클릭 후 #lbl_item_amt 값 변경 감지 (50ms 폴링, 최대 maxMs)
 // → AJAX 응답 완료 즉시 다음 단계로 진행
-async function waitForAmt(page, prevValue, maxMs = 2500) {
+async function waitForAmt(page, prevValue, maxMs = 3000) {
+  // div_55(#lbl_item_amt, ~218ms) + div_1(고지내역, ~307ms) 모두 완료 대기.
+  // 고지내역이 없으면 #lbl_item_amt 변경만으로도 진행.
   try {
     const f = findFeeFrame(page);
     if (!f) return;
@@ -64,7 +66,11 @@ async function waitForAmt(page, prevValue, maxMs = 2500) {
         const el = document.querySelector(sel);
         if (!el) return true;
         const curr = (el.innerText || '').replace(/,/g, '').trim();
-        return curr !== prev && curr !== '';
+        if (curr === prev || !curr) return false;
+        // 고지내역 테이블이 존재하면 데이터 로드 완료 확인
+        const noti = document.querySelector('.cont_table.left.mgR5:not(.show0)');
+        if (noti && noti.querySelectorAll('tr').length < 2) return false;
+        return true;
       },
       ['#lbl_item_amt', prevValue],
       { timeout: maxMs, polling: 50 }
@@ -194,15 +200,24 @@ async function readResidentData(page) {
         .filter(k => /^AR\d+$/.test(k))
         .sort((a, b) => parseInt(a.slice(2)) - parseInt(b.slice(2)));
 
-      // 전화번호 컬럼: 010/011 패턴 값 보유
+      // DOM element 포함 값 추출 헬퍼
+      const gv = v => {
+        if (!v) return '';
+        if (typeof v === 'string') return v.trim();
+        try { return (v.innerText ?? v.textContent ?? '').trim(); } catch { return ''; }
+      };
+
+      // 전화번호 컬럼: 010/011 패턴 값 보유 (string 및 DOM element 모두 처리)
       let phoneColId = null;
       for (const key of arAllKeys) {
         const rd = sheet.Rows[key];
         if (!rd) continue;
-        for (const [col, val] of Object.entries(rd)) {
-          if (RE_PHONE.test(String(val || '').trim().replace(/\s+/g, ''))) {
-            phoneColId = col; break;
-          }
+        for (const col of Object.keys(rd)) {
+          try {
+            if (RE_PHONE.test(gv(rd[col]).replace(/[-.\s]/g, ''))) {
+              phoneColId = col; break;
+            }
+          } catch {}
         }
         if (phoneColId) break;
       }
@@ -249,12 +264,14 @@ async function readResidentData(page) {
       const colOrder = Object.keys(sheet.Rows[arAllKeys[0]] || {});
       const colNameSets = {};
       for (const rd of sample) {
-        for (const [col, val] of Object.entries(rd)) {
-          const v = String(val || '').trim();
-          if (v && RE_KOREAN.test(v) && v.length <= 20) {
-            colNameSets[col] = colNameSets[col] || new Set();
-            colNameSets[col].add(v);
-          }
+        for (const col of Object.keys(rd)) {
+          try {
+            const v = gv(rd[col]);
+            if (v && RE_KOREAN.test(v) && v.length <= 20) {
+              colNameSets[col] = colNameSets[col] || new Set();
+              colNameSets[col].add(v);
+            }
+          } catch {}
         }
       }
       const nameColId = Object.entries(colNameSets)
@@ -271,10 +288,10 @@ async function readResidentData(page) {
         for (const key of arKeys) {
           const rd = sheet.Rows[key];
           if (!rd) continue;
-          const dong  = String(rd[dongColId] || '').trim();
-          const ho    = String(rd[hoColId]   || '').trim();
-          const name  = nameColId  ? String(rd[nameColId]  || '').trim() : '';
-          const phone = phoneColId ? String(rd[phoneColId] || '').trim() : '';
+          const dong  = gv(rd[dongColId]);
+          const ho    = gv(rd[hoColId]);
+          const name  = nameColId  ? gv(rd[nameColId])  : '';
+          const phone = phoneColId ? gv(rd[phoneColId]).replace(/[-.\s]/g,'') : '';
 
           if (dong && /^\d{1,4}$/.test(dong) && dong !== '합계') lastDong = dong;
           if (ho && /^\d{2,4}$/.test(ho) && ho !== '합계' && lastDong) {
@@ -342,22 +359,39 @@ async function readFeeUnitList(page) {
           .filter(k => /^AR\d+$/.test(k))
           .sort((a, b) => parseInt(a.slice(2)) - parseInt(b.slice(2)));
         if (arKeys.length > 0) {
+          // DOM element 또는 string 값 모두 처리하는 헬퍼
+          const gv = v => {
+            if (!v) return '';
+            if (typeof v === 'string') return v.trim();
+            try { return (v.innerText ?? v.textContent ?? '').trim(); } catch { return ''; }
+          };
+          const RE_PH = /^01[0-9]\d{7,8}$/;
+
           const result = [], seen = new Set();
           for (const key of arKeys) {
             const row = sheet.Rows[key];
             if (!row) continue;
-            const v = row['APT_NO_ROOM'];
-            if (!v || String(v).trim() === '전체') continue;
-            const m2 = String(v).trim().match(/(\d{1,4})\s*[-–—]\s*(\d{1,4})/);
+            const v = gv(row['APT_NO_ROOM']);
+            if (!v || v === '전체') continue;
+            const m2 = v.match(/(\d{1,4})\s*[-–—]\s*(\d{1,4})/);
             if (!m2) continue;
             const dk = `${m2[1]}-${m2[2]}`;
             if (!seen.has(dk)) {
               seen.add(dk);
+              // 전화번호: DOM element 포함 전 필드 스캔
+              let phone = '';
+              for (const fk of Object.keys(row)) {
+                try {
+                  const s = gv(row[fk]).replace(/[-.\s]/g, '');
+                  if (RE_PH.test(s)) { phone = s; break; }
+                } catch {}
+              }
               result.push({
                 dongho: dk,
                 dong: m2[1],
                 ho: m2[2],
-                name: String(row['HSHL_HEAD_NM'] || '').trim(),
+                name: gv(row['HSHL_HEAD_NM']),
+                phone,
               });
             }
           }
