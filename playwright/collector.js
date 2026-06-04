@@ -483,31 +483,30 @@ async function clickFeeUnit(page, dong, ho, listIndex = 0) {
   } catch {}
   await page.waitForTimeout(300);
 
-  // Phase 2: IBSheet.SheetClick() 직접 호출 — isTrusted 우회 완전 해소
-  // IBSheet[0].__proto__에 SheetClick 메서드 존재 확인됨 (2026-06-04).
-  // tr[idx] → Rows[idx]로 ARow 설정 후 SheetClick() 직접 호출.
-  // mouse 이벤트 / isTrusted / 좌표 계산 불필요.
+  // Phase 2: evaluate로 셀 마킹 → boundingBox() + page.mouse.click()
+  // boundingBox()는 Playwright CDP 내부 연산 → page 뷰포트 기준 절대좌표 (cross-origin 없음)
+  // page.mouse.click()은 CDP Input.dispatchMouseEvent → isTrusted=true
+  // 브라우저가 중첩 iframe까지 이벤트 자동 라우팅 → IBSheet 컨테이너 리스너 정상 도달
   try {
-    const clicked = await feeFrame.evaluate(([d, h]) => {
+    const marked = await feeFrame.evaluate(([d, h]) => {
       const norm = s => (s||'').replace(/\xa0/g,' ').replace(/\s+/g,' ').trim().replace(/[–—]/g,'-');
       const candidates = [`${d} - ${h}`, `${d}-${h}`, `${d}  -  ${h}`];
-      for (const tr of document.querySelectorAll('#sheetDivA tr[idx]')) {
-        const cell = tr.querySelector('[class*="APT_NO_ROOM"]');
-        if (!cell || !candidates.includes(norm(cell.innerText || cell.textContent))) continue;
-        const idx = tr.getAttribute('idx');
-        const sheet = window.IBSheet?.[0];
-        if (!sheet?.Rows?.[idx]) return false;
-        sheet.ARow = sheet.Rows[idx];
-        sheet.ASecol = 0;
-        if (typeof sheet.SheetClick === 'function') {
-          sheet.SheetClick(sheet.ARow, sheet.ASecol);
+      document.querySelectorAll('[data-pw-click]').forEach(el => el.removeAttribute('data-pw-click'));
+      for (const td of document.querySelectorAll('#sheetDivA [class*="APT_NO_ROOM"]')) {
+        if (candidates.includes(norm(td.innerText || td.textContent))) {
+          td.setAttribute('data-pw-click', '1');
           return true;
         }
-        return false;
       }
       return false;
     }, [dong, ho]);
-    if (clicked) return;
+    if (marked) {
+      const box = await feeFrame.locator('[data-pw-click="1"]').boundingBox();
+      if (box) {
+        await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+        return;
+      }
+    }
   } catch {}
 
   // Phase 3: JS 클릭 폴백 (isTrusted=false — IBSheet SheetClick 무시될 수 있음)
