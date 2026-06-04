@@ -483,27 +483,31 @@ async function clickFeeUnit(page, dong, ho, listIndex = 0) {
   } catch {}
   await page.waitForTimeout(300);
 
-  // Phase 2: evaluate로 APT_NO_ROOM 셀 마킹 → feeFrame.locator().click()
-  // findFeeFrame()의 실제 Frame 객체를 사용하므로 Playwright이 CDP로 isTrusted=true 클릭 수행.
-  // page.mouse.click()의 iframe 체인 좌표 계산(cross-origin 제한)보다 안정적.
+  // Phase 2: IBSheet.SheetClick() 직접 호출 — isTrusted 우회 완전 해소
+  // IBSheet[0].__proto__에 SheetClick 메서드 존재 확인됨 (2026-06-04).
+  // tr[idx] → Rows[idx]로 ARow 설정 후 SheetClick() 직접 호출.
+  // mouse 이벤트 / isTrusted / 좌표 계산 불필요.
   try {
-    const marked = await feeFrame.evaluate(([d, h]) => {
-      const norm = (s) => (s || '').replace(/\xa0/g, ' ').replace(/\s+/g, ' ').trim().replace(/[–—]/g, '-');
+    const clicked = await feeFrame.evaluate(([d, h]) => {
+      const norm = s => (s||'').replace(/\xa0/g,' ').replace(/\s+/g,' ').trim().replace(/[–—]/g,'-');
       const candidates = [`${d} - ${h}`, `${d}-${h}`, `${d}  -  ${h}`];
-      document.querySelectorAll('[data-pw-click]').forEach(el => el.removeAttribute('data-pw-click'));
-      for (const td of document.querySelectorAll('#sheetDivA [class*="APT_NO_ROOM"]')) {
-        if (candidates.includes(norm(td.innerText || td.textContent))) {
-          td.setAttribute('data-pw-click', '1');
+      for (const tr of document.querySelectorAll('#sheetDivA tr[idx]')) {
+        const cell = tr.querySelector('[class*="APT_NO_ROOM"]');
+        if (!cell || !candidates.includes(norm(cell.innerText || cell.textContent))) continue;
+        const idx = tr.getAttribute('idx');
+        const sheet = window.IBSheet?.[0];
+        if (!sheet?.Rows?.[idx]) return false;
+        sheet.ARow = sheet.Rows[idx];
+        sheet.ASecol = 0;
+        if (typeof sheet.SheetClick === 'function') {
+          sheet.SheetClick(sheet.ARow, sheet.ASecol);
           return true;
         }
+        return false;
       }
       return false;
     }, [dong, ho]);
-
-    if (marked) {
-      await feeFrame.locator('[data-pw-click="1"]').click({ timeout: 3000 });
-      return;
-    }
+    if (clicked) return;
   } catch {}
 
   // Phase 3: JS 클릭 폴백 (isTrusted=false — IBSheet SheetClick 무시될 수 있음)
