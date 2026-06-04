@@ -481,57 +481,27 @@ async function clickFeeUnit(page, dong, ho, listIndex = 0) {
   try {
     await feeFrame.evaluate(scrollFn, { t: target, li: listIndex });
   } catch {}
-  await page.waitForTimeout(200);
+  await page.waitForTimeout(300);
 
-  // Phase 2: iframe 체인 순회로 절대 좌표 계산 → page.mouse.click()
-  // feeFrame.locator().click()은 중첩 iframe에서 좌표 계산이 어긋날 수 있음.
-  // iframe 체인을 직접 올라가며 부모 offset을 합산 → page.mouse.click(absX, absY)로
-  // CDP 최상위 뷰포트 기준 정확한 좌표로 클릭.
+  // Phase 2: evaluate로 APT_NO_ROOM 셀 마킹 → feeFrame.locator().click()
+  // findFeeFrame()의 실제 Frame 객체를 사용하므로 Playwright이 CDP로 isTrusted=true 클릭 수행.
+  // page.mouse.click()의 iframe 체인 좌표 계산(cross-origin 제한)보다 안정적.
   try {
-    const absCoords = await feeFrame.evaluate(([d, h]) => {
-      const normalize = (s) => (s || '')
-        .replace(/\xa0/g, ' ').replace(/\s+/g, ' ').trim().replace(/[–—]/g, '-');
+    const marked = await feeFrame.evaluate(([d, h]) => {
+      const norm = (s) => (s || '').replace(/\xa0/g, ' ').replace(/\s+/g, ' ').trim().replace(/[–—]/g, '-');
       const candidates = [`${d} - ${h}`, `${d}-${h}`, `${d}  -  ${h}`];
-      let targetEl = null;
+      document.querySelectorAll('[data-pw-click]').forEach(el => el.removeAttribute('data-pw-click'));
       for (const td of document.querySelectorAll('#sheetDivA [class*="APT_NO_ROOM"]')) {
-        if (candidates.includes(normalize(td.innerText || td.textContent))) {
-          targetEl = td; break;
+        if (candidates.includes(norm(td.innerText || td.textContent))) {
+          td.setAttribute('data-pw-click', '1');
+          return true;
         }
       }
-      if (!targetEl) return null;
-
-      const rect = targetEl.getBoundingClientRect();
-      let x = rect.left + rect.width / 2;
-      let y = rect.top + rect.height / 2;
-
-      // 부모 iframe 체인 순회하며 뷰포트 절대 좌표로 변환
-      let win = window;
-      let depth = 0;
-      while (win !== win.top && depth < 10) {
-        depth++;
-        const parent = win.parent;
-        let found = false;
-        try {
-          for (const iframe of parent.document.querySelectorAll('iframe')) {
-            try {
-              if (iframe.contentWindow === win) {
-                const iRect = iframe.getBoundingClientRect();
-                x += iRect.left;
-                y += iRect.top;
-                win = parent;
-                found = true;
-                break;
-              }
-            } catch (e) {}
-          }
-        } catch (e) {}
-        if (!found) break;
-      }
-      return { x, y };
+      return false;
     }, [dong, ho]);
 
-    if (absCoords) {
-      await page.mouse.click(absCoords.x, absCoords.y);
+    if (marked) {
+      await feeFrame.locator('[data-pw-click="1"]').click({ timeout: 3000 });
       return;
     }
   } catch {}
