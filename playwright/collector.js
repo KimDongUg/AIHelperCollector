@@ -445,31 +445,27 @@ async function readFeeUnitList(page) {
  *  Phase 3: JS 클릭 폴백 — Frame 객체 직접 evaluate (타임아웃 없음)
  * ═══════════════════════════════════════════════════════════ */
 async function clickFeeUnit(page, dong, ho, listIndex = 0) {
-  // IBSheet가 ArrowDown 키보드 이벤트에 반응함을 확인 (2026-06-04).
-  // page.keyboard.press()는 CDP Input.dispatchKeyEvent → isTrusted=true.
-  // 마우스 클릭(iframe 좌표 계산 불필요)을 완전히 대체.
+  // ArrowDown(CDP, isTrusted=true)으로 순차 행 이동.
+  // 전제: 수집 시작 전 사용자가 첫 행(1-101)을 직접 클릭해야 함.
+  //       → IBSheet가 .IBCellFocusedCell 상태를 가져야 ArrowDown이 작동.
+  if (listIndex === 0) {
+    // 첫 행은 사용자가 이미 클릭한 상태 → 아무것도 하지 않음
+    return;
+  }
+
   const feeFrame = findFeeFrame(page);
   if (!feeFrame) return;
 
-  // feeFrame document에 키보드 포커스 설정
+  // .IBCellFocusedCell에 포커스 유지 → ArrowDown이 IBSheet에 도달
   try {
     await feeFrame.evaluate(() => {
-      const cell = document.querySelector('.IBCellFocusedCell')
-                || document.querySelector('#sheetDivA');
+      const cell = document.querySelector('.IBCellFocusedCell');
       if (cell) { cell.tabIndex = -1; cell.focus(); }
-      else { document.body.tabIndex = -1; document.body.focus(); }
     });
   } catch {}
 
   await page.waitForTimeout(50);
-
-  if (listIndex === 0) {
-    // 첫 행: Home 키로 IBSheet 첫 행(1-101) 선택
-    await page.keyboard.press('Home');
-  } else {
-    // 이후 행: ArrowDown으로 순차 이동
-    await page.keyboard.press('ArrowDown');
-  }
+  await page.keyboard.press('ArrowDown');
 }
 
 /* ═══════════════════════════════════════════════════════════
