@@ -157,12 +157,12 @@ async function runCollect(onProgress) {
  *  입주자현황: 동/호 → 이름/휴대폰 맵
  *
  *  IBSheet 가상 스크롤 특성:
- *    Rows['ARn'] 의 값은 현재 화면에 렌더된 <td> 참조.
- *    화면 밖 행은 DOM이 detach돼 innerText = '' → Rows 방식 불가.
+ *    .IBSectionScroll의 scrollHeight === clientHeight (DOM overflow 없음).
+ *    IBSheet가 자체적으로 행을 재사용해 렌더링 → DOM 스크롤 불가.
  *
- *  해결책: Playwright 레벨에서 단계적 스크롤 루프
- *    각 스크롤 위치에서 200ms 대기(IBSheet 렌더) → 보이는 행 수집
- *    → 846세대 전체 커버 (~30회 × 200ms ≈ 6초)
+ *  해결책: IBSheet.GotoRow(n) API로 특정 행으로 이동 →
+ *    IBSheet가 해당 행 주변을 DOM에 렌더링 → 보이는 행 수집.
+ *    총 행수는 Rows 키(AR1~ARn) 개수로 파악 (값은 DOM ref라도 키는 유효).
  * ═══════════════════════════════════════════════════════════ */
 async function readResidentData(page) {
   const RE_RESIDENT_URL = /020m02|IMPO2020|OCCP2020/i;
@@ -170,84 +170,82 @@ async function readResidentData(page) {
     || page.frames().find(f => /020m/.test(f.url()) && f.url() !== page.url());
   if (!resFrame) return {};
 
-  // 스크롤 컨테이너 크기 파악
-  const info = await resFrame.evaluate(() => {
-    const el = document.querySelector('.IBSectionScroll');
-    if (!el) return null;
-    return { sh: el.scrollHeight, ch: el.clientHeight };
+  // IBSheet 인덱스 + 총 행수 파악
+  const sheetMeta = await resFrame.evaluate(() => {
+    const container = document.querySelector('.cont_table');
+    const scrollEl  = container?.querySelector('.IBSectionScroll');
+    const m = (scrollEl?.getAttribute('onscroll') || '').match(/IBSheet\[(\d+)\]/);
+    const idx   = m ? parseInt(m[1]) : 0;
+    const sheet = window.IBSheet?.[idx];
+    if (!sheet?.Rows) return null;
+    const totalRows = Object.keys(sheet.Rows).filter(k => /^AR\d+$/.test(k)).length;
+    // 사용 가능한 행 이동 메서드 탐색
+    const navMethod = ['GotoRow','ScrollRow','GoRow','SetScrollPos','MoveRow']
+      .find(fn => typeof sheet[fn] === 'function') || null;
+    return { idx, totalRows, navMethod };
   });
-  if (!info || info.ch <= 0) return {};
 
-  const map = {};
-  let lastDong = '';                          // 스크롤 위치 간 동 번호 이어받기
-  const step = Math.max(Math.floor(info.ch * 0.75), 80);
-  let scrollTop = 0;
+  if (!sheetMeta || sheetMeta.totalRows === 0) return {};
 
-  // 현재 보이는 행에서 동/호/이름/전화 추출하는 브라우저 함수
-  // prevDong: 이전 스크롤에서 마지막으로 본 동 번호 (인자로 전달)
+  const { idx: sheetIdx, totalRows, navMethod } = sheetMeta;
+  const CHUNK = 20; // GotoRow 호출 간격 (화면에 ~25행 표시되므로 여유 있게)
+
+  // 현재 보이는 행에서 동/호/이름/전화 추출 (인자: 이전 스크롤의 마지막 동 번호)
   const collectVisible = (prevDong) => {
     const RE_PHONE = /^01[0-9]\d{7,8}$/;
     const container = document.querySelector('.cont_table');
     if (!container) return { rows: [], lastDong: prevDong };
-
     let ld = prevDong;
     const rows = [];
-
     for (const row of container.querySelectorAll('tr.IBDataRow')) {
       const tds = Array.from(row.querySelectorAll('td'))
         .filter(td => td.style.width !== '0px' && td.style.width !== '0');
       if (tds.length < 2) continue;
-
-      // 각 셀 텍스트: 줄바꿈 전 첫 번째 줄만 (IBSheet 멀티라인 방지)
       const vals = tds.map(td => (td.innerText || '').split('\n')[0].trim());
-      const c0 = vals[0] || '';
-      const c1 = vals[1] || '';
-      const name = vals[2] || '';
-      const phone = vals
-        .map(v => v.replace(/[-.\s]/g, ''))
+      const c0 = vals[0] || '', c1 = vals[1] || '';
+      const name  = vals[2] || '';
+      const phone = vals.map(v => v.replace(/[-.\s]/g, ''))
         .find(v => RE_PHONE.test(v)) || '';
-
       if (/^\d{1,2}$/.test(c0) && /^\d{2,4}$/.test(c1)) {
-        // 동 + 호 모두 있는 행
         ld = c0;
         rows.push({ dk: `${c0}-${c1}`, name, phone });
       } else if (/^\d{2,4}$/.test(c0) && ld) {
-        // 호만 있는 행 (동은 위 행에서 이어받음)
         rows.push({ dk: `${ld}-${c0}`, name, phone });
       }
     }
     return { rows, lastDong: ld };
   };
 
-  // 스크롤 루프: 맨 위 → 맨 아래까지 단계적으로 이동하며 수집
-  while (true) {
-    await resFrame.evaluate((top) => {
-      const el = document.querySelector('.IBSectionScroll');
-      if (el) { el.scrollTop = top; el.dispatchEvent(new Event('scroll')); }
-    }, scrollTop);
+  const map     = {};
+  let lastDong  = '';
 
-    await page.waitForTimeout(200); // IBSheet가 새 행을 DOM에 렌더링할 시간
-
-    const { rows, lastDong: newLastDong } = await resFrame.evaluate(collectVisible, lastDong);
-    lastDong = newLastDong;
-
+  const merge = (rows) => {
     for (const r of rows) {
-      if (!map[r.dk]) {
-        map[r.dk] = { name: r.name, phone: r.phone };
-      } else if (r.phone && !map[r.dk].phone) {
-        map[r.dk].phone = r.phone; // 전화번호 보완
-      }
+      if (!map[r.dk])                           map[r.dk] = { name: r.name, phone: r.phone };
+      else if (r.phone && !map[r.dk].phone)     map[r.dk].phone = r.phone;
     }
+  };
 
-    if (scrollTop + info.ch >= info.sh) break;
-    scrollTop = Math.min(scrollTop + step, info.sh - info.ch);
+  // GotoRow API 로 CHUNK 단위로 이동하며 수집
+  for (let rowNum = 1; rowNum <= totalRows; rowNum += CHUNK) {
+    // IBSheet 내부 행 이동 (DOM 렌더링 트리거)
+    await resFrame.evaluate(({ idx, nav, row }) => {
+      const sheet = window.IBSheet?.[idx];
+      if (sheet && nav) sheet[nav](row);
+    }, { idx: sheetIdx, nav: navMethod, row: rowNum });
+
+    await page.waitForTimeout(180); // IBSheet 렌더 대기
+
+    const { rows, lastDong: ld } = await resFrame.evaluate(collectVisible, lastDong);
+    lastDong = ld;
+    merge(rows);
   }
 
   // 맨 위로 복귀
-  await resFrame.evaluate(() => {
-    const el = document.querySelector('.IBSectionScroll');
-    if (el) el.scrollTop = 0;
-  });
+  await resFrame.evaluate(({ idx, nav }) => {
+    const sheet = window.IBSheet?.[idx];
+    if (sheet && nav) sheet[nav](1);
+  }, { idx: sheetIdx, nav: navMethod });
 
   return map;
 }
