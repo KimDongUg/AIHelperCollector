@@ -158,11 +158,13 @@ async function runCollect(onProgress) {
  *
  *  IBSheet 가상 스크롤 특성:
  *    Rows['ARn'] 값 = 현재 화면의 <td> 참조 → 화면 밖은 innerText=''
- *    .IBSectionScroll scrollHeight === clientHeight → DOM 스크롤 불가
+ *    scrollHeight === clientHeight → DOM scrollTop 불가
  *
- *  해결책: IBSheet.GetCellValue(rowNum, colId) API 사용
- *    → DOM 렌더링 없이 IBSheet 내부 데이터 직접 읽기
- *    → 컬럼 ID는 Rows 키(DOM ref라도 키는 유효)에서 추출 후 통계 탐색
+ *  2단계 수집:
+ *    Phase 1: 현재 보이는 행 DOM 직접 읽기 (동/호/이름/전화, ~21행 확실)
+ *    Phase 2: GetCellValue로 전화번호만 전체 846행 보완
+ *      - Rows 키에서 전화번호 컬럼 ID 탐색 (keyword + 하드코딩 후보)
+ *      - 성공 시 전체 전화번호 추가, 실패 시 Phase1 결과 유지
  * ═══════════════════════════════════════════════════════════ */
 async function readResidentData(page) {
   const RE_RESIDENT_URL = /020m02|IMPO2020|OCCP2020/i;
@@ -170,97 +172,109 @@ async function readResidentData(page) {
     || page.frames().find(f => /020m/.test(f.url()) && f.url() !== page.url());
   if (!resFrame) return {};
 
-  return await resFrame.evaluate(() => {
-    const RE_PHONE   = /^01[0-9]\d{7,8}$/;
-    const RE_KOREAN  = /[가-힣]/;
-    const map        = {};
-
-    // ── IBSheet 인스턴스 탐색 ──────────────────────────────────
+  // ── Phase 1: 보이는 행 DOM 수집 ─────────────────────────────
+  const map = {};
+  const { rows: visRows } = await resFrame.evaluate(() => {
+    const RE_PHONE = /^01[0-9]\d{7,8}$/;
     const container = document.querySelector('.cont_table');
-    const scrollEl  = container?.querySelector('.IBSectionScroll');
-    const m = (scrollEl?.getAttribute('onscroll') || '').match(/IBSheet\[(\d+)\]/);
-    const idx   = m ? parseInt(m[1]) : 0;
-    const sheet = window.IBSheet?.[idx];
-    if (!sheet?.Rows) return map;
-
-    const arAllKeys = Object.keys(sheet.Rows)
-      .filter(k => /^AR\d+$/.test(k))
-      .sort((a, b) => parseInt(a.slice(2)) - parseInt(b.slice(2)));
-    if (!arAllKeys.length) return map;
-
-    const totalRows = arAllKeys.length;
-
-    // GetCellValue API 확인 (IBSheet8 표준 메서드)
-    const gcv = sheet.GetCellValue || sheet.GetValue;
-    if (typeof gcv !== 'function') return map;
-
-    // ── 샘플 20행으로 컬럼 통계 탐색 ────────────────────────────
-    const allCols    = Object.keys(sheet.Rows[arAllKeys[0]] || {});
-    const sampleRows = Math.min(20, totalRows);
-    const colDong = {}, colHo = {}, colPhone = {}, colName = {};
-
-    for (let r = 1; r <= sampleRows; r++) {
-      for (const col of allCols) {
-        let v = '';
-        try {
-          const raw = gcv.call(sheet, r, col);
-          v = (raw == null) ? '' : String(raw).trim();
-        } catch { continue; }
-        if (!v) continue;
-
-        const n = parseInt(v);
-        if (/^\d{1,2}$/.test(v) && n >= 1 && n <= 99) {
-          (colDong[col] = colDong[col] || new Set()).add(v);
-        }
-        if (/^\d{3,4}$/.test(v) && n >= 101 && n <= 9999 && !(n >= 1900 && n <= 2100)) {
-          (colHo[col] = colHo[col] || new Set()).add(v);
-        }
-        const vNorm = v.replace(/[-.\s]/g, '');
-        if (RE_PHONE.test(vNorm)) {
-          (colPhone[col] = colPhone[col] || new Set()).add(vNorm);
-        }
-        if (RE_KOREAN.test(v) && v.length <= 20) {
-          (colName[col] = colName[col] || new Set()).add(v);
-        }
+    if (!container) return { rows: [] };
+    let ld = '';
+    const rows = [];
+    for (const row of container.querySelectorAll('tr.IBDataRow')) {
+      const tds = Array.from(row.querySelectorAll('td'))
+        .filter(td => td.style.width !== '0px' && td.style.width !== '0');
+      if (tds.length < 2) continue;
+      const vals = tds.map(td => (td.innerText || '').split('\n')[0].trim());
+      const c0 = vals[0] || '', c1 = vals[1] || '';
+      const name  = vals[2] || '';
+      const phone = vals.map(v => v.replace(/[-.\s]/g, '')).find(v => RE_PHONE.test(v)) || '';
+      if (/^\d{1,2}$/.test(c0) && /^\d{2,4}$/.test(c1)) {
+        ld = c0; rows.push({ dk: `${c0}-${c1}`, name, phone });
+      } else if (/^\d{2,4}$/.test(c0) && ld) {
+        rows.push({ dk: `${ld}-${c0}`, name, phone });
       }
     }
-
-    const dongCol  = Object.entries(colDong).sort(([,a],[,b]) => a.size - b.size)[0]?.[0] || null;
-    const hoCol    = Object.entries(colHo)
-                       .filter(([c]) => c !== dongCol)
-                       .sort(([,a],[,b]) => b.size - a.size)[0]?.[0] || null;
-    const phoneCol = Object.keys(colPhone)[0] || null;
-    const nameCol  = Object.entries(colName)
-                       .filter(([c]) => c !== dongCol && c !== hoCol && c !== phoneCol)
-                       .filter(([,s]) => s.size >= 3)
-                       .sort(([,a],[,b]) => b.size - a.size)[0]?.[0] || null;
-
-    if (!dongCol || !hoCol) return map;
-
-    // ── 전체 행 읽기 ─────────────────────────────────────────────
-    let lastDong = '';
-    for (let r = 1; r <= totalRows; r++) {
-      try {
-        const dong  = String(gcv.call(sheet, r, dongCol) ?? '').trim();
-        const ho    = String(gcv.call(sheet, r, hoCol)   ?? '').trim();
-        const name  = nameCol  ? String(gcv.call(sheet, r, nameCol)  ?? '').trim() : '';
-        const phone = phoneCol
-          ? String(gcv.call(sheet, r, phoneCol) ?? '').replace(/[-.\s]/g, '').trim()
-          : '';
-
-        if (dong && /^\d{1,2}$/.test(dong)) lastDong = dong;
-        const effDong = (dong && /^\d{1,2}$/.test(dong)) ? dong : lastDong;
-
-        if (ho && /^\d{2,4}$/.test(ho) && effDong) {
-          const key = `${effDong}-${ho}`;
-          if (!map[key])                    map[key] = { name, phone };
-          else if (phone && !map[key].phone) map[key].phone = phone;
-        }
-      } catch {}
-    }
-
-    return map;
+    return { rows };
   });
+
+  for (const r of visRows) {
+    if (!map[r.dk]) map[r.dk] = { name: r.name, phone: r.phone };
+    else if (r.phone && !map[r.dk].phone) map[r.dk].phone = r.phone;
+  }
+
+  // ── Phase 2: GetCellValue로 전화번호 전체 보완 ───────────────
+  // Rows 키(항상 유효)로 컬럼 ID 탐색 → GetCellValue로 실제 값 읽기
+  try {
+    const phoneMap = await resFrame.evaluate(() => {
+      const RE_PHONE = /^01[0-9]\d{7,8}$/;
+      const container = document.querySelector('.cont_table');
+      const scrollEl  = container?.querySelector('.IBSectionScroll');
+      const m = (scrollEl?.getAttribute('onscroll') || '').match(/IBSheet\[(\d+)\]/);
+      const sheet = window.IBSheet?.[m ? parseInt(m[1]) : 0];
+      if (!sheet?.Rows) return {};
+
+      const arKeys = Object.keys(sheet.Rows)
+        .filter(k => /^AR\d+$/.test(k))
+        .sort((a, b) => parseInt(a.slice(2)) - parseInt(b.slice(2)));
+      if (!arKeys.length) return {};
+
+      const gcv = sheet.GetCellValue || sheet.GetValue;
+      if (typeof gcv !== 'function') return {};
+
+      const rowKeys = Object.keys(sheet.Rows[arKeys[0]] || {});
+
+      // 전화번호 컬럼: Rows 키 키워드 매칭 + 하드코딩 후보 모두 시도
+      const phoneKwds = ['HP_NO','HP','MOBILE','MOBILE_NO','CELL_NO','CELL','TEL_HP','TEL','HPNO','HP2','CPHON'];
+      const phoneCandidates = [
+        ...rowKeys.filter(k => phoneKwds.some(w => k.toUpperCase().includes(w))),
+        ...phoneKwds,  // Rows에 없어도 GetCellValue 직접 시도
+      ];
+      // 동/호 컬럼: Rows 키 키워드 매칭
+      const dongKwds = ['APT_NO_DONG','DONG_NO','DONG','BDONG','BDONG_NM'];
+      const hoKwds   = ['APT_NO_ROOM','ROOM_NO','ROOM','HO_NO','HO','ROOM_NM'];
+      const dongCol  = rowKeys.find(k => dongKwds.some(w => k.toUpperCase() === w))
+                    || rowKeys.find(k => dongKwds.some(w => k.toUpperCase().includes(w)));
+      const hoCol    = rowKeys.find(k => hoKwds.some(w => k.toUpperCase() === w))
+                    || rowKeys.find(k => hoKwds.some(w => k.toUpperCase().includes(w)));
+      if (!dongCol || !hoCol) return {};
+
+      // 전화번호 컬럼 실제 탐색: 첫 5행에서 패턴 매칭
+      let phoneCol = null;
+      outer: for (const col of [...new Set(phoneCandidates)]) {
+        for (let r = 1; r <= Math.min(5, arKeys.length); r++) {
+          try {
+            const v = String(gcv.call(sheet, r, col) ?? '').replace(/[-.\s]/g, '');
+            if (RE_PHONE.test(v)) { phoneCol = col; break outer; }
+          } catch {}
+        }
+      }
+      if (!phoneCol) return {};
+
+      // 전체 행 전화번호 수집
+      const result = {};
+      let lastDong = '';
+      for (let r = 1; r <= arKeys.length; r++) {
+        try {
+          const dong  = String(gcv.call(sheet, r, dongCol) ?? '').trim();
+          const ho    = String(gcv.call(sheet, r, hoCol)   ?? '').trim();
+          const phone = String(gcv.call(sheet, r, phoneCol) ?? '').replace(/[-.\s]/g, '').trim();
+          if (dong && /^\d{1,2}$/.test(dong)) lastDong = dong;
+          const effDong = (dong && /^\d{1,2}$/.test(dong)) ? dong : lastDong;
+          if (ho && /^\d{2,4}$/.test(ho) && effDong && RE_PHONE.test(phone)) {
+            result[`${effDong}-${ho}`] = phone;
+          }
+        } catch {}
+      }
+      return result;
+    });
+
+    for (const [key, phone] of Object.entries(phoneMap)) {
+      if (!map[key]) map[key] = { name: '', phone };
+      else if (!map[key].phone) map[key].phone = phone;
+    }
+  } catch {}
+
+  return map;
 }
 
 /* ═══════════════════════════════════════════════════════════
