@@ -67,9 +67,12 @@ async function waitForAmt(page, prevValue, maxMs = 3000) {
         if (!el) return true;
         const curr = (el.innerText || '').replace(/,/g, '').trim();
         if (curr === prev || !curr) return false;
-        // 고지내역 테이블이 존재하면 데이터 로드 완료 확인
+        // 고지내역 또는 항목별 부과표 중 하나가 로드됐으면 진행
         const noti = document.querySelector('.cont_table.left.mgR5:not(.show0)');
-        if (noti && noti.querySelectorAll('tr').length < 2) return false;
+        const item = document.querySelector('.cont_table.left.mgR5.show0');
+        const notiOk = !noti || noti.querySelectorAll('tr').length >= 2;
+        const itemOk = !item || item.querySelectorAll('tr').length >= 2;
+        if (!notiOk || !itemOk) return false;
         return true;
       },
       ['#lbl_item_amt', prevValue],
@@ -195,6 +198,16 @@ async function readResidentData(page) {
 
     // ── 방법 A: IBSheet.Rows 전체 행 접근 ──────────────────
     if (sheet && sheet.Rows && typeof sheet.Rows === 'object') {
+      // IBSheet가 스크롤 기반으로 Rows를 지연 로드할 수 있으므로
+      // scrollEl을 강제로 끝까지 스크롤해 전체 행을 Rows에 로드시킴
+      if (scrollEl) {
+        const maxScroll = scrollEl.scrollHeight;
+        scrollEl.scrollTop = maxScroll;
+        scrollEl.dispatchEvent(new Event('scroll'));
+        scrollEl.scrollTop = 0;
+        scrollEl.dispatchEvent(new Event('scroll'));
+      }
+
       // ── 컬럼 통계 탐색 (DOM 가시성 무관) ─────────────────────
       const arAllKeys = Object.keys(sheet.Rows)
         .filter(k => /^AR\d+$/.test(k))
@@ -323,9 +336,10 @@ async function readResidentData(page) {
     return map;
   };
 
-  // frameLocator()는 직계 자식만 탐색 → 중첩 iframe 실패.
-  // findFeeFrame과 동일하게 page.frames()로 전체 탐색.
-  const resFrame = page.frames().find(f => /occp_020m02/.test(f.url()));
+  // SEL_RESIDENT 와 동일한 패턴으로 전체 frame 탐색
+  const RE_RESIDENT_URL = /020m02|IMPO2020|OCCP2020/i;
+  const resFrame = page.frames().find(f => RE_RESIDENT_URL.test(f.url()))
+    || page.frames().find(f => /020m/.test(f.url()) && f.url() !== page.url());
   if (!resFrame) return {};
   try {
     return await resFrame.evaluate(fn);
@@ -529,13 +543,11 @@ async function collectFeeData(page) {
       const s = el.tagName === 'INPUT' ? (el.value || '') : (el.innerText || '');
       return s.trim().replace(/,/g, '');
     }
-    // width:0px AND HideCol 클래스 둘 다 필터
+    // width:0px 만 필터 — HideCol 클래스는 IBSheet 컬럼 식별자일 뿐 숨김과 무관
     function visTds(row) {
-      return Array.from(row.querySelectorAll('td')).filter(td => {
-        if (td.style.width === '0px' || td.style.width === '0') return false;
-        for (const cls of td.classList) { if (cls.startsWith('HideCol')) return false; }
-        return true;
-      });
+      return Array.from(row.querySelectorAll('td')).filter(td =>
+        td.style.width !== '0px' && td.style.width !== '0'
+      );
     }
     // IBDataRow 만 사용 — fallback 제거 (헤더행 오염 차단)
     function dataRows(container) {
@@ -614,10 +626,15 @@ async function collectFeeData(page) {
   // 고지내역 div_1 AJAX(~307ms)가 div_55(~218ms)보다 늦게 완료되므로 명시적 대기.
   const feeFrame = findFeeFrame(page);
   if (feeFrame) {
+    // 고지내역(.mgR5:not(.show0)) 또는 항목별 부과표(.mgR5.show0) 중 하나라도
+    // 2행 이상 로드될 때까지 대기 (둘 다 없으면 타임아웃 후 진행)
     await feeFrame.waitForFunction(() => {
-      const t = document.querySelector('.cont_table.left.mgR5:not(.show0)');
-      return !t || t.querySelectorAll('tr').length >= 2;
-    }, { timeout: 2000 }).catch(() => {});
+      const noti = document.querySelector('.cont_table.left.mgR5:not(.show0)');
+      const item = document.querySelector('.cont_table.left.mgR5.show0');
+      if (noti && noti.querySelectorAll('tr').length >= 2) return true;
+      if (item && item.querySelectorAll('tr').length >= 2) return true;
+      return false;
+    }, { timeout: 2500 }).catch(() => {});
     try {
       const d = await feeFrame.evaluate(fn);
       if (Object.keys(d).length > 0) return d;
