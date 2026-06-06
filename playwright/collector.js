@@ -67,12 +67,9 @@ async function waitForAmt(page, prevValue, maxMs = 3000) {
         if (!el) return true;
         const curr = (el.innerText || '').replace(/,/g, '').trim();
         if (curr === prev || !curr) return false;
-        // 고지내역 또는 항목별 부과표 중 하나가 로드됐으면 진행
+        // 고지내역 테이블이 존재하면 데이터 로드 완료 확인
         const noti = document.querySelector('.cont_table.left.mgR5:not(.show0)');
-        const item = document.querySelector('.cont_table.left.mgR5.show0');
-        const notiOk = !noti || noti.querySelectorAll('tr').length >= 2;
-        const itemOk = !item || item.querySelectorAll('tr').length >= 2;
-        if (!notiOk || !itemOk) return false;
+        if (noti && noti.querySelectorAll('tr').length < 2) return false;
         return true;
       },
       ['#lbl_item_amt', prevValue],
@@ -626,15 +623,10 @@ async function collectFeeData(page) {
   // 고지내역 div_1 AJAX(~307ms)가 div_55(~218ms)보다 늦게 완료되므로 명시적 대기.
   const feeFrame = findFeeFrame(page);
   if (feeFrame) {
-    // 고지내역(.mgR5:not(.show0)) 또는 항목별 부과표(.mgR5.show0) 중 하나라도
-    // 2행 이상 로드될 때까지 대기 (둘 다 없으면 타임아웃 후 진행)
     await feeFrame.waitForFunction(() => {
-      const noti = document.querySelector('.cont_table.left.mgR5:not(.show0)');
-      const item = document.querySelector('.cont_table.left.mgR5.show0');
-      if (noti && noti.querySelectorAll('tr').length >= 2) return true;
-      if (item && item.querySelectorAll('tr').length >= 2) return true;
-      return false;
-    }, { timeout: 2500 }).catch(() => {});
+      const t = document.querySelector('.cont_table.left.mgR5:not(.show0)');
+      return !t || t.querySelectorAll('tr').length >= 2;
+    }, { timeout: 2000 }).catch(() => {});
     try {
       const d = await feeFrame.evaluate(fn);
       if (Object.keys(d).length > 0) return d;
