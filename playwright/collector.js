@@ -127,7 +127,7 @@ async function runCollect(onProgress) {
         allData.push({
           dong: unit.dong, ho: unit.ho,
           name: resident.name || unit.name || '',
-          phone: resident.phone || '',
+          phone: resident.phone || unit.phone || '',
           ...feeData,
         });
       } catch (err) {
@@ -173,9 +173,19 @@ async function readResidentData(page) {
 
     // IBSheet 인스턴스 가져오기
     const scrollEl = container.querySelector('.IBSectionScroll');
+    // onscroll 속성에서 IBSheet 인덱스 추출, 실패 시 Rows가 가장 많은 인스턴스 사용
     const sheetIdx = (() => {
       const m = (scrollEl?.getAttribute('onscroll') || '').match(/IBSheet\[(\d+)\]/);
-      return m ? parseInt(m[1]) : 0;
+      if (m) return parseInt(m[1]);
+      // 폴백: 모든 IBSheet 인스턴스 중 AR 행이 가장 많은 것 선택
+      let best = 0, bestCnt = 0;
+      Object.keys(window.IBSheet || {}).forEach(k => {
+        const s = window.IBSheet[k];
+        if (!s || !s.Rows) return;
+        const cnt = Object.keys(s.Rows).filter(r => /^AR\d+$/.test(r)).length;
+        if (cnt > bestCnt) { bestCnt = cnt; best = k; }
+      });
+      return best;
     })();
     const sheet = window.IBSheet?.[sheetIdx];
 
@@ -338,6 +348,25 @@ async function readResidentData(page) {
   const resFrame = page.frames().find(f => RE_RESIDENT_URL.test(f.url()))
     || page.frames().find(f => /020m/.test(f.url()) && f.url() !== page.url());
   if (!resFrame) return {};
+
+  // IBSheet 가 가상 스크롤로 지연 로드할 경우를 대비해
+  // Playwright 레벨에서 스크롤을 끝까지 내리고 300ms 대기 후 다시 올림
+  try {
+    await resFrame.evaluate(() => {
+      const scrollEl = document.querySelector('.IBSectionScroll');
+      if (scrollEl) {
+        scrollEl.scrollTop = scrollEl.scrollHeight;
+        scrollEl.dispatchEvent(new Event('scroll'));
+      }
+    });
+    await page.waitForTimeout(300);
+    await resFrame.evaluate(() => {
+      const scrollEl = document.querySelector('.IBSectionScroll');
+      if (scrollEl) { scrollEl.scrollTop = 0; scrollEl.dispatchEvent(new Event('scroll')); }
+    });
+    await page.waitForTimeout(100);
+  } catch {}
+
   try {
     return await resFrame.evaluate(fn);
   } catch {
@@ -537,6 +566,9 @@ async function collectFeeData(page) {
     // ── 공통 헬퍼 ────────────────────────────────────────────
     function txt(el) {
       if (!el) return '';
+      // IBSheet는 TD 안에 <input> 으로 값을 렌더링하는 경우가 있음
+      const inp = el.querySelector && el.querySelector('input');
+      if (inp) return (inp.value || '').trim().replace(/,/g, '');
       const s = el.tagName === 'INPUT' ? (el.value || '') : (el.innerText || '');
       return s.trim().replace(/,/g, '');
     }
@@ -607,13 +639,8 @@ async function collectFeeData(page) {
     if (currAmt) data['당월부과액'] = txt(currAmt);
     if (julAmt)  data['절상차액']   = txt(julAmt);
 
-    // ── 항목별 부과 — 6컬럼 쌍 테이블 ───────────────────────
-    // 구조: 항목명|금액|항목명|금액|항목명|금액 (3쌍/행)
-    extractPairs(
-      document.querySelector('.cont_table.left.mgR5.show0'),
-      '항목',
-      ['항목명', '항목', '부과항목', '합계', '']
-    );
+    // .cont_table.left.mgR5.show0 은 당월 전체 건물 합계 테이블 —
+    // 세대 선택과 무관하게 고정값이므로 추출 제외
 
     return data;
   };
