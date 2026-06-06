@@ -154,224 +154,102 @@ async function runCollect(onProgress) {
 }
 
 /* ═══════════════════════════════════════════════════════════
- *  입주자현황: 동/호 → 휴대폰 맵  (.cont_table → IBSheet)
+ *  입주자현황: 동/호 → 이름/휴대폰 맵
  *
- *  관리비조회와 동일하게 IBSheet[n].Rows 내부 메모리 접근으로
- *  가상 스크롤 우회 → 847행 전체 수집
+ *  IBSheet 가상 스크롤 특성:
+ *    Rows['ARn'] 의 값은 현재 화면에 렌더된 <td> 참조.
+ *    화면 밖 행은 DOM이 detach돼 innerText = '' → Rows 방식 불가.
  *
- *  컬럼 ID 자동 탐색:
- *    DOM 첫 IBDataRow의 HideColXXX 클래스에서 동/호 ID 추출
- *    전화번호 컬럼: 010/011... 패턴 값 가진 컬럼 자동 탐색
+ *  해결책: Playwright 레벨에서 단계적 스크롤 루프
+ *    각 스크롤 위치에서 200ms 대기(IBSheet 렌더) → 보이는 행 수집
+ *    → 846세대 전체 커버 (~30회 × 200ms ≈ 6초)
  * ═══════════════════════════════════════════════════════════ */
 async function readResidentData(page) {
-  const fn = () => {
-    const map = {};
-    const RE_PHONE = /^0[1][0-9][-\s]?\d{3,4}[-\s]?\d{4}$/;
-
-    const container = document.querySelector('.cont_table');
-    if (!container) return map;
-
-    // IBSheet 인스턴스 가져오기
-    const scrollEl = container.querySelector('.IBSectionScroll');
-    // onscroll 속성에서 IBSheet 인덱스 추출, 실패 시 Rows가 가장 많은 인스턴스 사용
-    const sheetIdx = (() => {
-      const m = (scrollEl?.getAttribute('onscroll') || '').match(/IBSheet\[(\d+)\]/);
-      if (m) return parseInt(m[1]);
-      // 폴백: 모든 IBSheet 인스턴스 중 AR 행이 가장 많은 것 선택
-      let best = 0, bestCnt = 0;
-      Object.keys(window.IBSheet || {}).forEach(k => {
-        const s = window.IBSheet[k];
-        if (!s || !s.Rows) return;
-        const cnt = Object.keys(s.Rows).filter(r => /^AR\d+$/.test(r)).length;
-        if (cnt > bestCnt) { bestCnt = cnt; best = k; }
-      });
-      return best;
-    })();
-    const sheet = window.IBSheet?.[sheetIdx];
-
-    // HideColXXX 클래스에서 컬럼 ID 추출
-    function getColId(td) {
-      for (const cls of td.classList) {
-        if (cls.startsWith('HideCol')) {
-          return cls.slice('HideCol'.length).replace(/^\d+/, '');
-        }
-      }
-      return null;
-    }
-    function visTds(row) {
-      return Array.from(row.querySelectorAll('td'))
-        .filter(td => td.style.width !== '0px' && td.style.width !== '0');
-    }
-
-    // ── 방법 A: IBSheet.Rows 전체 행 접근 ──────────────────
-    if (sheet && sheet.Rows && typeof sheet.Rows === 'object') {
-      // IBSheet가 스크롤 기반으로 Rows를 지연 로드할 수 있으므로
-      // scrollEl을 강제로 끝까지 스크롤해 전체 행을 Rows에 로드시킴
-      if (scrollEl) {
-        const maxScroll = scrollEl.scrollHeight;
-        scrollEl.scrollTop = maxScroll;
-        scrollEl.dispatchEvent(new Event('scroll'));
-        scrollEl.scrollTop = 0;
-        scrollEl.dispatchEvent(new Event('scroll'));
-      }
-
-      // ── 컬럼 통계 탐색 (DOM 가시성 무관) ─────────────────────
-      const arAllKeys = Object.keys(sheet.Rows)
-        .filter(k => /^AR\d+$/.test(k))
-        .sort((a, b) => parseInt(a.slice(2)) - parseInt(b.slice(2)));
-
-      // DOM element 포함 값 추출 헬퍼
-      const gv = v => {
-        if (!v) return '';
-        if (typeof v === 'string') return v.trim();
-        try { return (v.innerText ?? v.textContent ?? '').trim(); } catch { return ''; }
-      };
-
-      // 전화번호 컬럼: 010/011 패턴 값 보유 (string 및 DOM element 모두 처리)
-      let phoneColId = null;
-      for (const key of arAllKeys) {
-        const rd = sheet.Rows[key];
-        if (!rd) continue;
-        for (const col of Object.keys(rd)) {
-          try {
-            if (RE_PHONE.test(gv(rd[col]).replace(/[-.\s]/g, ''))) {
-              phoneColId = col; break;
-            }
-          } catch {}
-        }
-        if (phoneColId) break;
-      }
-      // 패턴 미발견 시 컬럼 이름으로 추가 탐색
-      if (!phoneColId) {
-        const firstRd = sheet.Rows[arAllKeys[0]] || {};
-        const kwds = ['HP_NO','HP','MOBILE','MOBILE_NO','CELL','PHONE','TEL'];
-        phoneColId = Object.keys(firstRd)
-          .find(k => kwds.some(w => k.toUpperCase().includes(w))) || null;
-      }
-
-      // 동/호 컬럼: 샘플 20행의 값 분포로 통계 탐색
-      // 동 컬럼: 소수(1-99)이며 행 간 거의 동일
-      // 호 컬럼: 101-9999 범위의 다양한 값
-      const sample = arAllKeys.slice(0, 20)
-        .map(k => sheet.Rows[k]).filter(Boolean);
-      const colDongSets = {}, colHoSets = {};
-      for (const rd of sample) {
-        for (const [col, val] of Object.entries(rd)) {
-          const v = String(val || '').trim();
-          const n = parseInt(v);
-          if (/^\d{1,2}$/.test(v) && n >= 1 && n <= 99) {
-            colDongSets[col] = colDongSets[col] || new Set();
-            colDongSets[col].add(v);
-          }
-          if (/^\d{3,4}$/.test(v) && n >= 101 && n <= 9999
-              && !(n >= 1900 && n <= 2100)) {
-            colHoSets[col] = colHoSets[col] || new Set();
-            colHoSets[col].add(v);
-          }
-        }
-      }
-      // 동 컬럼: 작은 고유값 수 (같은 동 내 단위는 동 값이 동일)
-      const dongColId = Object.entries(colDongSets)
-        .sort(([,a],[,b]) => a.size - b.size)[0]?.[0] || null;
-      // 호 컬럼: 많은 고유값 (각 세대마다 다른 호)
-      const hoColId = Object.entries(colHoSets)
-        .filter(([col]) => col !== dongColId)
-        .sort(([,a],[,b]) => b.size - a.size)[0]?.[0] || null;
-
-      // 입주자 이름 컬럼: 한글 포함, 다양한 값
-      // 컬럼 순서 기준으로 첫 번째 한글 다중값 컬럼 (입주자 > 소유주 순서)
-      const RE_KOREAN = /[가-힣]/;
-      const colOrder = Object.keys(sheet.Rows[arAllKeys[0]] || {});
-      const colNameSets = {};
-      for (const rd of sample) {
-        for (const col of Object.keys(rd)) {
-          try {
-            const v = gv(rd[col]);
-            if (v && RE_KOREAN.test(v) && v.length <= 20) {
-              colNameSets[col] = colNameSets[col] || new Set();
-              colNameSets[col].add(v);
-            }
-          } catch {}
-        }
-      }
-      const nameColId = Object.entries(colNameSets)
-        .filter(([col]) => col !== dongColId && col !== hoColId && col !== phoneColId)
-        .filter(([,s]) => s.size >= 3)
-        .sort(([colA],[colB]) => colOrder.indexOf(colA) - colOrder.indexOf(colB))[0]?.[0] || null;
-
-      if (dongColId && hoColId) {
-        const arKeys = Object.keys(sheet.Rows)
-          .filter(k => /^AR\d+$/.test(k))
-          .sort((a, b) => parseInt(a.slice(2)) - parseInt(b.slice(2)));
-
-        let lastDong = '';
-        for (const key of arKeys) {
-          const rd = sheet.Rows[key];
-          if (!rd) continue;
-          const dong  = gv(rd[dongColId]);
-          const ho    = gv(rd[hoColId]);
-          const name  = nameColId  ? gv(rd[nameColId])  : '';
-          const phone = phoneColId ? gv(rd[phoneColId]).replace(/[-.\s]/g,'') : '';
-
-          if (dong && /^\d{1,4}$/.test(dong) && dong !== '합계') lastDong = dong;
-          if (ho && /^\d{2,4}$/.test(ho) && ho !== '합계' && lastDong) {
-            map[`${lastDong}-${ho}`] = { name, phone };
-          }
-        }
-        if (Object.keys(map).length > 0) return map;
-      }
-    }
-
-    // ── 방법 B: DOM visible 행 폴백 (부분 수집) ────────────
-    let lastDong = '';
-    for (const row of container.querySelectorAll('tr.IBDataRow')) {
-      const tds = visTds(row);
-      if (tds.length < 2) continue;
-      const c0 = (tds[0]?.innerText || '').trim().split(/[\t\n]/)[0].replace(/\s+/g, '');
-      const c1 = (tds[1]?.innerText || '').trim().split(/[\t\n]/)[0].replace(/\s+/g, '');
-      const name  = (tds[2]?.innerText || '').trim();
-      const phone = tds.map(td => (td.innerText||'').trim().replace(/\s+/g,''))
-        .find(v => RE_PHONE.test(v)) || '';
-
-      if (/^\d{1,4}$/.test(c0) && /^\d{2,4}$/.test(c1)) {
-        lastDong = c0;
-        map[`${lastDong}-${c1}`] = { name, phone };
-      } else if (/^\d{2,4}$/.test(c0) && lastDong) {
-        map[`${lastDong}-${c0}`] = { name, phone };
-      }
-    }
-    return map;
-  };
-
-  // SEL_RESIDENT 와 동일한 패턴으로 전체 frame 탐색
   const RE_RESIDENT_URL = /020m02|IMPO2020|OCCP2020/i;
   const resFrame = page.frames().find(f => RE_RESIDENT_URL.test(f.url()))
     || page.frames().find(f => /020m/.test(f.url()) && f.url() !== page.url());
   if (!resFrame) return {};
 
-  // IBSheet 가 가상 스크롤로 지연 로드할 경우를 대비해
-  // Playwright 레벨에서 스크롤을 끝까지 내리고 300ms 대기 후 다시 올림
-  try {
-    await resFrame.evaluate(() => {
-      const scrollEl = document.querySelector('.IBSectionScroll');
-      if (scrollEl) {
-        scrollEl.scrollTop = scrollEl.scrollHeight;
-        scrollEl.dispatchEvent(new Event('scroll'));
-      }
-    });
-    await page.waitForTimeout(300);
-    await resFrame.evaluate(() => {
-      const scrollEl = document.querySelector('.IBSectionScroll');
-      if (scrollEl) { scrollEl.scrollTop = 0; scrollEl.dispatchEvent(new Event('scroll')); }
-    });
-    await page.waitForTimeout(100);
-  } catch {}
+  // 스크롤 컨테이너 크기 파악
+  const info = await resFrame.evaluate(() => {
+    const el = document.querySelector('.IBSectionScroll');
+    if (!el) return null;
+    return { sh: el.scrollHeight, ch: el.clientHeight };
+  });
+  if (!info || info.ch <= 0) return {};
 
-  try {
-    return await resFrame.evaluate(fn);
-  } catch {
-    return {};
+  const map = {};
+  let lastDong = '';                          // 스크롤 위치 간 동 번호 이어받기
+  const step = Math.max(Math.floor(info.ch * 0.75), 80);
+  let scrollTop = 0;
+
+  // 현재 보이는 행에서 동/호/이름/전화 추출하는 브라우저 함수
+  // prevDong: 이전 스크롤에서 마지막으로 본 동 번호 (인자로 전달)
+  const collectVisible = (prevDong) => {
+    const RE_PHONE = /^01[0-9]\d{7,8}$/;
+    const container = document.querySelector('.cont_table');
+    if (!container) return { rows: [], lastDong: prevDong };
+
+    let ld = prevDong;
+    const rows = [];
+
+    for (const row of container.querySelectorAll('tr.IBDataRow')) {
+      const tds = Array.from(row.querySelectorAll('td'))
+        .filter(td => td.style.width !== '0px' && td.style.width !== '0');
+      if (tds.length < 2) continue;
+
+      // 각 셀 텍스트: 줄바꿈 전 첫 번째 줄만 (IBSheet 멀티라인 방지)
+      const vals = tds.map(td => (td.innerText || '').split('\n')[0].trim());
+      const c0 = vals[0] || '';
+      const c1 = vals[1] || '';
+      const name = vals[2] || '';
+      const phone = vals
+        .map(v => v.replace(/[-.\s]/g, ''))
+        .find(v => RE_PHONE.test(v)) || '';
+
+      if (/^\d{1,2}$/.test(c0) && /^\d{2,4}$/.test(c1)) {
+        // 동 + 호 모두 있는 행
+        ld = c0;
+        rows.push({ dk: `${c0}-${c1}`, name, phone });
+      } else if (/^\d{2,4}$/.test(c0) && ld) {
+        // 호만 있는 행 (동은 위 행에서 이어받음)
+        rows.push({ dk: `${ld}-${c0}`, name, phone });
+      }
+    }
+    return { rows, lastDong: ld };
+  };
+
+  // 스크롤 루프: 맨 위 → 맨 아래까지 단계적으로 이동하며 수집
+  while (true) {
+    await resFrame.evaluate((top) => {
+      const el = document.querySelector('.IBSectionScroll');
+      if (el) { el.scrollTop = top; el.dispatchEvent(new Event('scroll')); }
+    }, scrollTop);
+
+    await page.waitForTimeout(200); // IBSheet가 새 행을 DOM에 렌더링할 시간
+
+    const { rows, lastDong: newLastDong } = await resFrame.evaluate(collectVisible, lastDong);
+    lastDong = newLastDong;
+
+    for (const r of rows) {
+      if (!map[r.dk]) {
+        map[r.dk] = { name: r.name, phone: r.phone };
+      } else if (r.phone && !map[r.dk].phone) {
+        map[r.dk].phone = r.phone; // 전화번호 보완
+      }
+    }
+
+    if (scrollTop + info.ch >= info.sh) break;
+    scrollTop = Math.min(scrollTop + step, info.sh - info.ch);
   }
+
+  // 맨 위로 복귀
+  await resFrame.evaluate(() => {
+    const el = document.querySelector('.IBSectionScroll');
+    if (el) el.scrollTop = 0;
+  });
+
+  return map;
 }
 
 /* ═══════════════════════════════════════════════════════════
