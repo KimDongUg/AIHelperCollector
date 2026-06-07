@@ -237,9 +237,12 @@ async function readResidentData(page) {
     }
   } catch {}
 
-  // ── Phase 3: IBSheet.GetCellValue로 전체 846행 phone 보완 ────────
-  // DOM 스캔으로 phone을 못 가져온 행을 IBSheet API로 채움.
-  // GetCellValue(rowIndex, colId)는 DOM 렌더링과 무관하게 내부 데이터 반환.
+  // ── Phase 3: IBSheet.Rows / GetCellValue로 전체 846행 phone 보완 ────────
+  // 확인된 컬럼 ID (XpERP occp_020m02 입주자현황):
+  //   PRT_APT_NO      : 동 ("1")
+  //   PRT_APT_ROOM    : 호 ("101")
+  //   I_MOBILE_TEL_NO1: 입주자 휴대폰 ("010-xxxx-xxxx")
+  //   S_MOBILE_TEL_NO1: 소유주 휴대폰 (fallback)
   try {
     const phoneMap = await resFrame.evaluate(() => {
       const RE_PHONE = /^01[0-9]\d{7,8}$/;
@@ -251,63 +254,50 @@ async function readResidentData(page) {
       const sheet = window.IBSheet?.[m ? parseInt(m[1]) : 0];
       if (!sheet) return {};
 
-      // GetCellValue 또는 GetValue API 탐색
-      const gcv = sheet.GetCellValue?.bind(sheet) || sheet.GetValue?.bind(sheet);
-      // 전체 행 수 탐색
-      const lastRow = (sheet.LastRow || sheet.GetRowCount)?.call(sheet);
-      if (!gcv || !lastRow || lastRow < 1) return {};
+      const gv = v => {
+        if (v == null) return '';
+        if (typeof v === 'string') return v.trim();
+        try { return String(v.innerText ?? v.textContent ?? '').trim(); } catch { return ''; }
+      };
 
-      // 전화번호 컬럼 ID 탐색 — 패턴 매칭 우선, 키워드 폴백
-      const phoneKwds = ['HP_NO','HP','MOBILE','MOBILE_NO','CELL_NO','CELPH',
-                         'PHONE','TEL','TELHP','HDPHONE','HANDPHONE','CPHONE'];
-      let phoneColId = null;
+      // 방법 A: IBSheet.Rows 직접 접근 (하드코딩 컬럼 ID)
+      const arKeys = Object.keys(sheet.Rows || {})
+        .filter(k => /^AR\d+$/.test(k))
+        .sort((a, b) => parseInt(a.slice(2)) - parseInt(b.slice(2)));
 
-      // 첫 20행에서 각 후보 컬럼의 값이 전화번호 패턴인지 확인
-      const sampleRows = Math.min(20, lastRow);
-      for (const kwd of phoneKwds) {
-        for (let r = 1; r <= sampleRows; r++) {
+      if (arKeys.length > 0) {
+        const result = {};
+        for (const key of arKeys) {
           try {
-            const v = String(gcv(r, kwd) || '').replace(/[-.\s]/g, '');
-            if (RE_PHONE.test(v)) { phoneColId = kwd; break; }
+            const row = sheet.Rows[key];
+            if (!row) continue;
+            const dong = gv(row['PRT_APT_NO']);
+            const ho   = gv(row['PRT_APT_ROOM']);
+            if (!dong || !ho) continue;
+            const dk = `${parseInt(dong)}-${parseInt(ho)}`;
+            let ph = gv(row['I_MOBILE_TEL_NO1']).replace(/[-.\s]/g, '');
+            if (!RE_PHONE.test(ph)) ph = gv(row['S_MOBILE_TEL_NO1']).replace(/[-.\s]/g, '');
+            if (RE_PHONE.test(ph)) result[dk] = ph;
           } catch {}
         }
-        if (phoneColId) break;
+        if (Object.keys(result).length > 0) return result;
       }
 
-      if (!phoneColId) return {}; // 컬럼 ID 탐지 실패
-
-      // 동/호 컬럼 탐색 — APT_NO_ROOM 복합 컬럼 또는 개별 컬럼
-      const dongHoKwds = ['APT_NO_ROOM','APT_DONG_HO'];
-      const dongKwds   = ['APT_NO','DONG_NO','DONG','V_APT_NO','APT_DONG'];
-      const hoKwds     = ['APT_ROOM','HO_NO','HO','V_APT_ROOM','APT_HO'];
+      // 방법 B: GetCellValue API fallback
+      const gcv = sheet.GetCellValue?.bind(sheet) || sheet.GetValue?.bind(sheet);
+      const lastRow = (sheet.LastRow || sheet.GetRowCount)?.call(sheet);
+      if (!gcv || !lastRow || lastRow < 1) return {};
 
       const result = {};
       for (let r = 1; r <= lastRow; r++) {
         try {
-          const ph = String(gcv(r, phoneColId) || '').replace(/[-.\s]/g, '');
-          if (!RE_PHONE.test(ph)) continue;
-
-          // 동호 키 결정 — 복합 컬럼 시도
-          let dk = null;
-          for (const c of dongHoKwds) {
-            const v = String(gcv(r, c) || '').trim();
-            const mm = v.match(/(\d{1,4})\s*[-–—]\s*(\d{1,4})/);
-            if (mm) { dk = `${parseInt(mm[1])}-${parseInt(mm[2])}`; break; }
-          }
-          // 개별 동/호 컬럼 시도
-          if (!dk) {
-            let dong = '', ho = '';
-            for (const c of dongKwds) {
-              const v = String(gcv(r, c) || '').trim();
-              if (/^\d{1,4}$/.test(v)) { dong = String(parseInt(v)); break; }
-            }
-            for (const c of hoKwds) {
-              const v = String(gcv(r, c) || '').trim();
-              if (/^\d{2,4}$/.test(v)) { ho = String(parseInt(v)); break; }
-            }
-            if (dong && ho) dk = `${dong}-${ho}`;
-          }
-          if (dk) result[dk] = ph;
+          const dong = String(gcv(r, 'PRT_APT_NO') || '').trim();
+          const ho   = String(gcv(r, 'PRT_APT_ROOM') || '').trim();
+          if (!dong || !ho) continue;
+          const dk = `${parseInt(dong)}-${parseInt(ho)}`;
+          let ph = String(gcv(r, 'I_MOBILE_TEL_NO1') || '').replace(/[-.\s]/g, '');
+          if (!RE_PHONE.test(ph)) ph = String(gcv(r, 'S_MOBILE_TEL_NO1') || '').replace(/[-.\s]/g, '');
+          if (RE_PHONE.test(ph)) result[dk] = ph;
         } catch {}
       }
       return result;
