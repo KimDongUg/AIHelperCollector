@@ -10,7 +10,7 @@ let storedResidentMap = null; // 1단계 수집 결과 보관
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 560,
-    height: 820,
+    height: 980,
     resizable: false,
     title: 'AI Helper 수집기',
     icon: path.join(__dirname, '..', 'assets', 'icon.ico'),
