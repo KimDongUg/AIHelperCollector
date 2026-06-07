@@ -175,13 +175,17 @@ function collectVisible(lastDong) {
   let ld = lastDong || '';
   const rows = [];
   for (const row of container.querySelectorAll('tr.IBDataRow')) {
-    const tds = Array.from(row.querySelectorAll('td'))
-      .filter(td => td.style.width !== '0px' && td.style.width !== '0');
-    if (tds.length < 2) continue;
-    const vals = tds.map(td => (td.innerText || '').split('\n')[0].trim());
+    const allTds = Array.from(row.querySelectorAll('td'));
+    // 동/호 판별용: 너비 있는 컬럼만
+    const visTds = allTds.filter(td => td.style.width !== '0px' && td.style.width !== '0');
+    if (visTds.length < 2) continue;
+    const vals = visTds.map(td => (td.innerText || '').split('\n')[0].trim());
     const c0 = vals[0] || '', c1 = vals[1] || '';
-    const name  = vals[2] || '';
-    const phone = vals.map(v => v.replace(/[-.\s]/g, '')).find(v => RE_PHONE.test(v)) || '';
+    const name = vals[2] || '';
+    // 전화번호: 숨김 컬럼(width:0)도 포함해서 전체 td 스캔 (textContent 사용)
+    const phone = allTds
+      .map(td => (td.textContent || '').split('\n')[0].trim().replace(/[-.\s]/g, ''))
+      .find(v => RE_PHONE.test(v)) || '';
     if (/^\d{1,2}$/.test(c0) && /^\d{2,4}$/.test(c1)) {
       ld = c0; rows.push({ dk: `${c0}-${c1}`, name, phone });
     } else if (/^\d{2,4}$/.test(c0) && ld) {
@@ -230,6 +234,88 @@ async function readResidentData(page) {
       if (newSize === prevMapSize) { staleCount++; }
       else { staleCount = 0; prevMapSize = newSize; }
       if (staleCount >= 3) break;
+    }
+  } catch {}
+
+  // ── Phase 3: IBSheet.GetCellValue로 전체 846행 phone 보완 ────────
+  // DOM 스캔으로 phone을 못 가져온 행을 IBSheet API로 채움.
+  // GetCellValue(rowIndex, colId)는 DOM 렌더링과 무관하게 내부 데이터 반환.
+  try {
+    const phoneMap = await resFrame.evaluate(() => {
+      const RE_PHONE = /^01[0-9]\d{7,8}$/;
+      const container = document.querySelector('.cont_table');
+      if (!container) return {};
+
+      const scrollEl = container.querySelector('.IBSectionScroll');
+      const m = (scrollEl?.getAttribute('onscroll') || '').match(/IBSheet\[(\d+)\]/);
+      const sheet = window.IBSheet?.[m ? parseInt(m[1]) : 0];
+      if (!sheet) return {};
+
+      // GetCellValue 또는 GetValue API 탐색
+      const gcv = sheet.GetCellValue?.bind(sheet) || sheet.GetValue?.bind(sheet);
+      // 전체 행 수 탐색
+      const lastRow = (sheet.LastRow || sheet.GetRowCount)?.call(sheet);
+      if (!gcv || !lastRow || lastRow < 1) return {};
+
+      // 전화번호 컬럼 ID 탐색 — 패턴 매칭 우선, 키워드 폴백
+      const phoneKwds = ['HP_NO','HP','MOBILE','MOBILE_NO','CELL_NO','CELPH',
+                         'PHONE','TEL','TELHP','HDPHONE','HANDPHONE','CPHONE'];
+      let phoneColId = null;
+
+      // 첫 20행에서 각 후보 컬럼의 값이 전화번호 패턴인지 확인
+      const sampleRows = Math.min(20, lastRow);
+      for (const kwd of phoneKwds) {
+        for (let r = 1; r <= sampleRows; r++) {
+          try {
+            const v = String(gcv(r, kwd) || '').replace(/[-.\s]/g, '');
+            if (RE_PHONE.test(v)) { phoneColId = kwd; break; }
+          } catch {}
+        }
+        if (phoneColId) break;
+      }
+
+      if (!phoneColId) return {}; // 컬럼 ID 탐지 실패
+
+      // 동/호 컬럼 탐색 — APT_NO_ROOM 복합 컬럼 또는 개별 컬럼
+      const dongHoKwds = ['APT_NO_ROOM','APT_DONG_HO'];
+      const dongKwds   = ['APT_NO','DONG_NO','DONG','V_APT_NO','APT_DONG'];
+      const hoKwds     = ['APT_ROOM','HO_NO','HO','V_APT_ROOM','APT_HO'];
+
+      const result = {};
+      for (let r = 1; r <= lastRow; r++) {
+        try {
+          const ph = String(gcv(r, phoneColId) || '').replace(/[-.\s]/g, '');
+          if (!RE_PHONE.test(ph)) continue;
+
+          // 동호 키 결정 — 복합 컬럼 시도
+          let dk = null;
+          for (const c of dongHoKwds) {
+            const v = String(gcv(r, c) || '').trim();
+            const mm = v.match(/(\d{1,4})\s*[-–—]\s*(\d{1,4})/);
+            if (mm) { dk = `${parseInt(mm[1])}-${parseInt(mm[2])}`; break; }
+          }
+          // 개별 동/호 컬럼 시도
+          if (!dk) {
+            let dong = '', ho = '';
+            for (const c of dongKwds) {
+              const v = String(gcv(r, c) || '').trim();
+              if (/^\d{1,4}$/.test(v)) { dong = String(parseInt(v)); break; }
+            }
+            for (const c of hoKwds) {
+              const v = String(gcv(r, c) || '').trim();
+              if (/^\d{2,4}$/.test(v)) { ho = String(parseInt(v)); break; }
+            }
+            if (dong && ho) dk = `${dong}-${ho}`;
+          }
+          if (dk) result[dk] = ph;
+        } catch {}
+      }
+      return result;
+    });
+
+    for (const [dk, ph] of Object.entries(phoneMap)) {
+      if (map[dk]) map[dk].phone = map[dk].phone || ph;
+      else         map[dk] = { name: '', phone: ph };
     }
   } catch {}
 
