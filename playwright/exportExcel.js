@@ -5,6 +5,7 @@ const path = require('path');
 const FIXED_COLS = [
   { key: 'dong',  header: '동' },
   { key: 'ho',    header: '호' },
+  { key: 'name',  header: '이름' },
   { key: 'phone', header: '휴대폰' },
 ];
 

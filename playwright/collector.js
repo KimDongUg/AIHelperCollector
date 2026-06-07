@@ -516,7 +516,7 @@ async function clickFeeUnit(page, dong, ho, listIndex = 0) {
  *  검침내역  : .cont_table.sheetDTap              — 항목|전월|당월|요금
  *  할인내역  : .cont_table.left.sheetETap         — 2컬럼 (항목명|금액)
  *  항목별요약: #lbl_item_amt / #lbl_curr_amt / #lbl_jul_amt
- *  항목별표  : .cont_table.left.mgR5.show0        — 6컬럼 (3쌍: 항목명|금액 반복)
+ *  항목별표  : .cont_table.left.mgR5.show0        — 세대별 항목(4쌍/행)
  * ═══════════════════════════════════════════════════════════ */
 async function collectFeeData(page) {
   const fn = () => {
@@ -545,7 +545,7 @@ async function collectFeeData(page) {
     // IBSheet 빈 데이터 안내 메시지 목록
     const NODATA_MSGS = ['조회된 데이터가 없습니다.', '데이터가 없습니다.', '조회결과가 없습니다.'];
 
-    // (항목명|금액) 쌍 반복 추출 — 2컬럼/4컬럼/6컬럼 모두 처리
+    // (항목명|금액) 쌍 반복 추출 — 2컬럼/4컬럼/8컬럼 모두 처리
     function extractPairs(container, prefix, skipKeys) {
       for (const row of dataRows(container)) {
         const cells = visTds(row);
@@ -554,8 +554,8 @@ async function collectFeeData(page) {
         for (let i = 0; i + 1 < cells.length; i += 2) {
           const key = cells[i].innerText.trim();
           const val = txt(cells[i + 1]);
-          // 빈 키, 헤더 스킵 키, 비정상 길이(헤더 연결 방지) 제외
-          if (!key || key.length > 30 || skipKeys.includes(key)) continue;
+          // 빈 키, 숫자 전용 키(순번/IBSheet 인덱스), 헤더 스킵 키, 비정상 길이 제외
+          if (!key || /^\d+$/.test(key) || key.length > 30 || skipKeys.includes(key)) continue;
           if (NODATA_MSGS.some(m => val.includes(m))) continue;
           data[prefix ? `${prefix}_${key}` : key] = val;
         }
@@ -590,6 +590,14 @@ async function collectFeeData(page) {
       ['할인항목명', '항목', '순번', '신청일자', '적용할인금액', '건수', '할인일자', '합계', '']
     );
 
+    // ── 항목별 부과내역 (세대별 상세 항목) ─────────────────────
+    // prefix '항목_' 로 구분 — 고지내역 요약과 키 충돌 방지
+    extractPairs(
+      document.querySelector('.cont_table.left.mgR5.show0'),
+      '항목',
+      ['항목명', '항목', '금액', '합계', '']
+    );
+
     // ── 항목별 부과 — ID 요약값 ──────────────────────────────
     const itemAmt = document.querySelector('#lbl_item_amt');
     const currAmt = document.querySelector('#lbl_curr_amt');
@@ -597,9 +605,6 @@ async function collectFeeData(page) {
     if (itemAmt) data['부과항목계'] = txt(itemAmt);
     if (currAmt) data['당월부과액'] = txt(currAmt);
     if (julAmt)  data['절상차액']   = txt(julAmt);
-
-    // .cont_table.left.mgR5.show0 은 당월 전체 건물 합계 테이블 —
-    // 세대 선택과 무관하게 고정값이므로 추출 제외
 
     return data;
   };
@@ -610,9 +615,12 @@ async function collectFeeData(page) {
   const feeFrame = findFeeFrame(page);
   if (feeFrame) {
     await feeFrame.waitForFunction(() => {
-      const t = document.querySelector('.cont_table.left.mgR5:not(.show0)');
-      return !t || t.querySelectorAll('tr').length >= 2;
-    }, { timeout: 2000 }).catch(() => {});
+      const t1 = document.querySelector('.cont_table.left.mgR5:not(.show0)');
+      const t2 = document.querySelector('.cont_table.left.mgR5.show0');
+      const ok1 = !t1 || t1.querySelectorAll('tr').length >= 2;
+      const ok2 = !t2 || t2.querySelectorAll('tr').length >= 2;
+      return ok1 && ok2;
+    }, { timeout: 3000 }).catch(() => {});
     try {
       const d = await feeFrame.evaluate(fn);
       if (Object.keys(d).length > 0) return d;
