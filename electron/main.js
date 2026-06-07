@@ -5,6 +5,7 @@ const fs = require('fs');
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 let mainWindow;
+let storedResidentMap = null; // 1단계 수집 결과 보관
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -77,14 +78,28 @@ ipcMain.handle('connect-erp', async (_e, port) => {
   }
 });
 
-// 수집 시작
+// 1단계: 입주자현황 수집
+ipcMain.handle('collect-resident', async () => {
+  const { runResidentCollect } = require('../playwright/collector');
+  try {
+    const result = await runResidentCollect((progress) => {
+      mainWindow.webContents.send('progress-update', progress);
+    });
+    if (result.ok) storedResidentMap = result.map;
+    return { ok: result.ok, count: result.count, error: result.error };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+// 2단계: 관리비 수집
 ipcMain.handle('start-collect', async () => {
-  const { runCollect } = require('../playwright/collector');
+  const { runFeeCollect } = require('../playwright/collector');
   try {
     const outputDir = path.join(__dirname, '..', 'output');
     if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
 
-    const result = await runCollect((progress) => {
+    const result = await runFeeCollect(storedResidentMap, (progress) => {
       mainWindow.webContents.send('progress-update', progress);
     });
     return result;

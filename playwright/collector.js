@@ -79,9 +79,32 @@ async function waitForAmt(page, prevValue, maxMs = 3000) {
 }
 
 /* ═══════════════════════════════════════════════════════════
- *  MAIN
+ *  STEP 1: 입주자현황 수집 → 이름/휴대폰 맵 반환
  * ═══════════════════════════════════════════════════════════ */
-async function runCollect(onProgress) {
+async function runResidentCollect(onProgress) {
+  stopFlag = false;
+  try {
+    const page = await getPage();
+    onProgress({ text: '입주자현황 읽는 중...' });
+    const map = await readResidentData(page);
+    const count = Object.keys(map).length;
+    if (count === 0) {
+      return {
+        ok: false,
+        error: '입주자현황 데이터를 읽지 못했습니다.\nXpERP 입주자현황 탭을 열고 첫 번째 행을 클릭한 뒤 다시 시도하세요.',
+      };
+    }
+    return { ok: true, count, map };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════
+ *  STEP 2: 관리비 수집 → 엑셀 생성
+ *  residentMap: step 1에서 수집한 이름/휴대폰 맵 (없으면 빈 객체)
+ * ═══════════════════════════════════════════════════════════ */
+async function runFeeCollect(residentMap, onProgress) {
   stopFlag = false;
   const page      = await getPage();
   const outputDir = path.join(__dirname, '..', 'output');
@@ -91,12 +114,10 @@ async function runCollect(onProgress) {
 
   const allData     = [];
   const failedUnits = [];
+  const rMap        = residentMap || {};
 
   try {
-    onProgress({ current: 0, total: 0, unit: '① 입주자현황 읽는 중...' });
-    const residentMap = await readResidentData(page);
-
-    onProgress({ current: 0, total: 0, unit: '② 관리비조회 목록 읽는 중...' });
+    onProgress({ current: 0, total: 0, unit: '관리비조회 목록 읽는 중...' });
     const feeResult = await readFeeUnitList(page);
     const feeUnits  = Array.isArray(feeResult) ? feeResult : [];
     const feeDiag   = (!Array.isArray(feeResult) && feeResult?.__diag) ? feeResult.__diag : '';
@@ -117,12 +138,12 @@ async function runCollect(onProgress) {
       onProgress({ current: i + 1, total, unit: unit.dongho });
 
       try {
-        const prevAmt = await readLblAmt(page);          // 클릭 전 값 기억
+        const prevAmt = await readLblAmt(page);
         await clickFeeUnit(page, unit.dong, unit.ho, i);
-        await waitForAmt(page, prevAmt);                 // 값 변경 감지 (최대 2.5s)
+        await waitForAmt(page, prevAmt);
 
         const feeData  = await collectFeeData(page);
-        const resident = residentMap[`${unit.dong}-${unit.ho}`] || {};
+        const resident = rMap[`${unit.dong}-${unit.ho}`] || {};
 
         allData.push({
           dong: unit.dong, ho: unit.ho,
@@ -610,4 +631,4 @@ async function collectFeeData(page) {
   return {};
 }
 
-module.exports = { runCollect, stopCollect };
+module.exports = { runResidentCollect, runFeeCollect, stopCollect };
