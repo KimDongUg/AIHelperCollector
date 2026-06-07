@@ -554,8 +554,8 @@ async function collectFeeData(page) {
         for (let i = 0; i + 1 < cells.length; i += 2) {
           const key = cells[i].innerText.trim();
           const val = txt(cells[i + 1]);
-          // 빈 키, 숫자 전용 키(순번/IBSheet 인덱스), 헤더 스킵 키, 비정상 길이 제외
-          if (!key || /^\d+$/.test(key) || key.length > 30 || skipKeys.includes(key)) continue;
+          // 빈 키, 숫자 전용 키(순번), IBSheet 셀 ID(A5/B6 형태), 헤더 스킵 키, 비정상 길이 제외
+          if (!key || /^\d+$/.test(key) || /^[A-Z]\d+$/.test(key) || key.length > 30 || skipKeys.includes(key)) continue;
           if (NODATA_MSGS.some(m => val.includes(m))) continue;
           data[prefix ? `${prefix}_${key}` : key] = val;
         }
