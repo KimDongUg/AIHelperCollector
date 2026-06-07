@@ -1,6 +1,5 @@
-const fs = require('fs');
+const fs   = require('fs');
 const path = require('path');
-const FormData = require('form-data');
 const fetch = require('node-fetch');
 
 const MAX_RETRIES = 3;
@@ -13,28 +12,28 @@ async function uploadFile(filePath, uploadUrl, apiKey) {
     return { ok: false, error: '업로드할 파일이 존재하지 않습니다: ' + filePath };
   }
 
+  const filename = path.basename(filePath);
+  const url = `${uploadUrl}?filename=${encodeURIComponent(filename)}`;
+
   let lastError = '';
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const form = new FormData();
-      form.append('file', fs.createReadStream(filePath), {
-        filename: path.basename(filePath),
-        contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      });
-
-      const headers = { ...form.getHeaders() };
+      const body    = fs.readFileSync(filePath);
+      const headers = {
+        'Content-Type': 'application/octet-stream',
+      };
       if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
 
-      const res = await fetch(uploadUrl, {
+      const res = await fetch(url, {
         method: 'POST',
-        body: form,
+        body,
         headers,
-        timeout: 30000,
+        timeout: 60000,
       });
 
       if (!res.ok) {
-        const body = await res.text();
-        throw new Error(`서버 응답 ${res.status}: ${body}`);
+        const text = await res.text();
+        throw new Error(`서버 응답 ${res.status}: ${text}`);
       }
 
       return { ok: true };
