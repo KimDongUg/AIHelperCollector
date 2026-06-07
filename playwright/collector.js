@@ -157,15 +157,40 @@ async function runCollect(onProgress) {
  *  입주자현황: 동/호 → 이름/휴대폰 맵
  *
  *  IBSheet 가상 스크롤 특성:
- *    Rows['ARn'] 값 = 현재 화면의 <td> 참조 → 화면 밖은 innerText=''
  *    scrollHeight === clientHeight → DOM scrollTop 불가
+ *    PageDown 키보드 이벤트로 IBSheet 내부 스크롤 유도
  *
  *  2단계 수집:
- *    Phase 1: 현재 보이는 행 DOM 직접 읽기 (동/호/이름/전화, ~21행 확실)
- *    Phase 2: GetCellValue로 전화번호만 전체 846행 보완
- *      - Rows 키에서 전화번호 컬럼 ID 탐색 (keyword + 하드코딩 후보)
- *      - 성공 시 전체 전화번호 추가, 실패 시 Phase1 결과 유지
+ *    Phase 1: 현재 보이는 행 DOM 직접 읽기 (~21행)
+ *    Phase 2: PageDown 반복으로 전체 행 수집
+ *      - force click으로 IBSheet 포커스 → PageDown → 수집 반복
+ *      - 3회 연속 새 행 없으면 맨 아래로 판단하고 종료
  * ═══════════════════════════════════════════════════════════ */
+
+// evaluate()에 직렬화해서 넘기는 헬퍼 — 브라우저 컨텍스트에서 실행됨
+function collectVisible(lastDong) {
+  const RE_PHONE = /^01[0-9]\d{7,8}$/;
+  const container = document.querySelector('.cont_table');
+  if (!container) return { rows: [], lastDong };
+  let ld = lastDong || '';
+  const rows = [];
+  for (const row of container.querySelectorAll('tr.IBDataRow')) {
+    const tds = Array.from(row.querySelectorAll('td'))
+      .filter(td => td.style.width !== '0px' && td.style.width !== '0');
+    if (tds.length < 2) continue;
+    const vals = tds.map(td => (td.innerText || '').split('\n')[0].trim());
+    const c0 = vals[0] || '', c1 = vals[1] || '';
+    const name  = vals[2] || '';
+    const phone = vals.map(v => v.replace(/[-.\s]/g, '')).find(v => RE_PHONE.test(v)) || '';
+    if (/^\d{1,2}$/.test(c0) && /^\d{2,4}$/.test(c1)) {
+      ld = c0; rows.push({ dk: `${c0}-${c1}`, name, phone });
+    } else if (/^\d{2,4}$/.test(c0) && ld) {
+      rows.push({ dk: `${ld}-${c0}`, name, phone });
+    }
+  }
+  return { rows, lastDong: ld };
+}
+
 async function readResidentData(page) {
   const RE_RESIDENT_URL = /020m02|IMPO2020|OCCP2020/i;
   const resFrame = page.frames().find(f => RE_RESIDENT_URL.test(f.url()))
@@ -174,28 +199,7 @@ async function readResidentData(page) {
 
   // ── Phase 1: 보이는 행 DOM 수집 ─────────────────────────────
   const map = {};
-  const { rows: visRows } = await resFrame.evaluate(() => {
-    const RE_PHONE = /^01[0-9]\d{7,8}$/;
-    const container = document.querySelector('.cont_table');
-    if (!container) return { rows: [] };
-    let ld = '';
-    const rows = [];
-    for (const row of container.querySelectorAll('tr.IBDataRow')) {
-      const tds = Array.from(row.querySelectorAll('td'))
-        .filter(td => td.style.width !== '0px' && td.style.width !== '0');
-      if (tds.length < 2) continue;
-      const vals = tds.map(td => (td.innerText || '').split('\n')[0].trim());
-      const c0 = vals[0] || '', c1 = vals[1] || '';
-      const name  = vals[2] || '';
-      const phone = vals.map(v => v.replace(/[-.\s]/g, '')).find(v => RE_PHONE.test(v)) || '';
-      if (/^\d{1,2}$/.test(c0) && /^\d{2,4}$/.test(c1)) {
-        ld = c0; rows.push({ dk: `${c0}-${c1}`, name, phone });
-      } else if (/^\d{2,4}$/.test(c0) && ld) {
-        rows.push({ dk: `${ld}-${c0}`, name, phone });
-      }
-    }
-    return { rows };
-  });
+  const { rows: visRows, lastDong: initLastDong } = await resFrame.evaluate(collectVisible, '');
 
   for (const r of visRows) {
     if (!map[r.dk]) map[r.dk] = { name: r.name, phone: r.phone };
@@ -203,19 +207,17 @@ async function readResidentData(page) {
   }
 
   // ── Phase 2: PageDown 키보드 네비게이션으로 전체 행 수집 ────────
-  // occp_020m02 frame이 visible(display:block, 825×819)임을 확인.
-  // force click으로 IBSheet 포커스 → PageDown으로 페이지 이동 → 수집 반복.
   try {
-    // IBSheet 첫 번째 행 클릭으로 포커스 획득
     await resFrame.locator('tr.IBDataRow').first().click({ force: true });
     await page.waitForTimeout(200);
 
+    let lastDong   = initLastDong;
     let staleCount  = 0;
     let prevMapSize = Object.keys(map).length;
 
     for (let i = 0; i < 60; i++) {
       await page.keyboard.press('PageDown');
-      await page.waitForTimeout(160); // IBSheet 렌더 대기
+      await page.waitForTimeout(160);
 
       const { rows, lastDong: ld } = await resFrame.evaluate(collectVisible, lastDong);
       lastDong = ld;
@@ -227,7 +229,7 @@ async function readResidentData(page) {
       const newSize = Object.keys(map).length;
       if (newSize === prevMapSize) { staleCount++; }
       else { staleCount = 0; prevMapSize = newSize; }
-      if (staleCount >= 3) break; // 3회 연속 새 행 없으면 맨 아래 도달
+      if (staleCount >= 3) break;
     }
   } catch {}
 
