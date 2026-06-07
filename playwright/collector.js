@@ -202,75 +202,32 @@ async function readResidentData(page) {
     else if (r.phone && !map[r.dk].phone) map[r.dk].phone = r.phone;
   }
 
-  // ── Phase 2: GetCellValue로 전화번호 전체 보완 ───────────────
-  // Rows 키(항상 유효)로 컬럼 ID 탐색 → GetCellValue로 실제 값 읽기
+  // ── Phase 2: PageDown 키보드 네비게이션으로 전체 행 수집 ────────
+  // occp_020m02 frame이 visible(display:block, 825×819)임을 확인.
+  // force click으로 IBSheet 포커스 → PageDown으로 페이지 이동 → 수집 반복.
   try {
-    const phoneMap = await resFrame.evaluate(() => {
-      const RE_PHONE = /^01[0-9]\d{7,8}$/;
-      const container = document.querySelector('.cont_table');
-      const scrollEl  = container?.querySelector('.IBSectionScroll');
-      const m = (scrollEl?.getAttribute('onscroll') || '').match(/IBSheet\[(\d+)\]/);
-      const sheet = window.IBSheet?.[m ? parseInt(m[1]) : 0];
-      if (!sheet?.Rows) return {};
+    // IBSheet 첫 번째 행 클릭으로 포커스 획득
+    await resFrame.locator('tr.IBDataRow').first().click({ force: true });
+    await page.waitForTimeout(200);
 
-      const arKeys = Object.keys(sheet.Rows)
-        .filter(k => /^AR\d+$/.test(k))
-        .sort((a, b) => parseInt(a.slice(2)) - parseInt(b.slice(2)));
-      if (!arKeys.length) return {};
+    let staleCount  = 0;
+    let prevMapSize = Object.keys(map).length;
 
-      const gcv = sheet.GetCellValue || sheet.GetValue;
-      if (typeof gcv !== 'function') return {};
+    for (let i = 0; i < 60; i++) {
+      await page.keyboard.press('PageDown');
+      await page.waitForTimeout(160); // IBSheet 렌더 대기
 
-      const rowKeys = Object.keys(sheet.Rows[arKeys[0]] || {});
-
-      // 전화번호 컬럼: Rows 키 키워드 매칭 + 하드코딩 후보 모두 시도
-      const phoneKwds = ['HP_NO','HP','MOBILE','MOBILE_NO','CELL_NO','CELL','TEL_HP','TEL','HPNO','HP2','CPHON'];
-      const phoneCandidates = [
-        ...rowKeys.filter(k => phoneKwds.some(w => k.toUpperCase().includes(w))),
-        ...phoneKwds,  // Rows에 없어도 GetCellValue 직접 시도
-      ];
-      // 동/호 컬럼: Rows 키 키워드 매칭
-      const dongKwds = ['APT_NO_DONG','DONG_NO','DONG','BDONG','BDONG_NM'];
-      const hoKwds   = ['APT_NO_ROOM','ROOM_NO','ROOM','HO_NO','HO','ROOM_NM'];
-      const dongCol  = rowKeys.find(k => dongKwds.some(w => k.toUpperCase() === w))
-                    || rowKeys.find(k => dongKwds.some(w => k.toUpperCase().includes(w)));
-      const hoCol    = rowKeys.find(k => hoKwds.some(w => k.toUpperCase() === w))
-                    || rowKeys.find(k => hoKwds.some(w => k.toUpperCase().includes(w)));
-      if (!dongCol || !hoCol) return {};
-
-      // 전화번호 컬럼 실제 탐색: 첫 5행에서 패턴 매칭
-      let phoneCol = null;
-      outer: for (const col of [...new Set(phoneCandidates)]) {
-        for (let r = 1; r <= Math.min(5, arKeys.length); r++) {
-          try {
-            const v = String(gcv.call(sheet, r, col) ?? '').replace(/[-.\s]/g, '');
-            if (RE_PHONE.test(v)) { phoneCol = col; break outer; }
-          } catch {}
-        }
+      const { rows, lastDong: ld } = await resFrame.evaluate(collectVisible, lastDong);
+      lastDong = ld;
+      for (const r of rows) {
+        if (!map[r.dk])                       map[r.dk] = { name: r.name, phone: r.phone };
+        else if (r.phone && !map[r.dk].phone) map[r.dk].phone = r.phone;
       }
-      if (!phoneCol) return {};
 
-      // 전체 행 전화번호 수집
-      const result = {};
-      let lastDong = '';
-      for (let r = 1; r <= arKeys.length; r++) {
-        try {
-          const dong  = String(gcv.call(sheet, r, dongCol) ?? '').trim();
-          const ho    = String(gcv.call(sheet, r, hoCol)   ?? '').trim();
-          const phone = String(gcv.call(sheet, r, phoneCol) ?? '').replace(/[-.\s]/g, '').trim();
-          if (dong && /^\d{1,2}$/.test(dong)) lastDong = dong;
-          const effDong = (dong && /^\d{1,2}$/.test(dong)) ? dong : lastDong;
-          if (ho && /^\d{2,4}$/.test(ho) && effDong && RE_PHONE.test(phone)) {
-            result[`${effDong}-${ho}`] = phone;
-          }
-        } catch {}
-      }
-      return result;
-    });
-
-    for (const [key, phone] of Object.entries(phoneMap)) {
-      if (!map[key]) map[key] = { name: '', phone };
-      else if (!map[key].phone) map[key].phone = phone;
+      const newSize = Object.keys(map).length;
+      if (newSize === prevMapSize) { staleCount++; }
+      else { staleCount = 0; prevMapSize = newSize; }
+      if (staleCount >= 3) break; // 3회 연속 새 행 없으면 맨 아래 도달
     }
   } catch {}
 
