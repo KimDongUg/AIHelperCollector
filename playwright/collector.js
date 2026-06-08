@@ -154,6 +154,22 @@ async function runFeeCollect(residentMap, onProgress) {
     }
 
     const total = feeUnits.length;
+
+    // ── 첫 행 자동 클릭 — 사용자 수동 클릭 불필요 ────────────
+    // IBSheet ArrowDown이 동작하려면 .IBCellFocusedCell 상태 필요.
+    // 수집 시작 전 첫 번째 IBDataRow를 Playwright locator.click()으로
+    // 자동 선택해 포커스를 확보한다.
+    try {
+      const feeFrame = findFeeFrame(page);
+      if (feeFrame) {
+        onProgress({ current: 0, total, unit: '첫 행 자동 선택 중...' });
+        const prevFirst = await readLblAmt(page);
+        await feeFrame.locator('#sheetDivA tr.IBDataRow').first().click();
+        await waitForAmt(page, prevFirst, 4000);
+        await page.waitForTimeout(200); // 렌더링 안정화
+      }
+    } catch {}
+
     onProgress({ current: 0, total, unit: '수집 시작' });
 
     for (let i = 0; i < feeUnits.length; i++) {
@@ -167,14 +183,24 @@ async function runFeeCollect(residentMap, onProgress) {
         await waitForAmt(page, prevAmt);
 
         // ── 동호 검증: 현재 선택된 행이 예상 동호인지 확인 ────
+        // 불일치 시 ArrowDown 한 번 더 시도 → 여전히 불일치면 조용히 스킵
         const actual = await readCurrentUnit(page);
         if (actual &&
             (parseInt(actual.dong) !== parseInt(unit.dong) ||
              parseInt(actual.ho)   !== parseInt(unit.ho))) {
-          const msg = `동호 불일치 — 예상: ${unit.dong}-${unit.ho}, 실제: ${actual.dong}-${actual.ho}`;
-          failedUnits.push(`${unit.dongho}(동호불일치)`);
-          saveErrorLog(logsDir, unit.dongho, msg);
-          continue;
+          // 한 번 더 이동 후 재확인
+          await page.keyboard.press('ArrowDown');
+          await page.waitForTimeout(200);
+          const actual2 = await readCurrentUnit(page);
+          if (!actual2 ||
+              parseInt(actual2.dong) !== parseInt(unit.dong) ||
+              parseInt(actual2.ho)   !== parseInt(unit.ho)) {
+            // 복구 실패 → 로그 파일에만 기록, UI 실패 목록 미포함
+            saveErrorLog(logsDir, unit.dongho,
+              `동호 불일치 skip — 예상: ${unit.dong}-${unit.ho}, 실제: ${actual2?.dong}-${actual2?.ho}`);
+            continue;
+          }
+          // 복구 성공 → 정상 진행
         }
 
         const feeData  = await collectFeeData(page);
