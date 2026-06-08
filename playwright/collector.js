@@ -42,6 +42,27 @@ function findFeeFrame(page) {
   return page.frames().find(f => SEL_FEE_RE.test(f.url())) || null;
 }
 
+// ERP 관리비조회 화면에서 청구 년월(YYYYMM) 읽기
+// 년월 선택 select 또는 페이지 텍스트에서 "YYYY년 MM월" 파싱
+async function readFeeYearMonth(page) {
+  try {
+    const feeFrame = findFeeFrame(page);
+    if (!feeFrame) return null;
+    return await feeFrame.evaluate(() => {
+      const getVal = el => el?.value || el?.options?.[el?.selectedIndex]?.value || '';
+      const year  = getVal(document.querySelector('select[id*="year" i],select[name*="year" i]'));
+      const month = getVal(document.querySelector('select[id*="month" i],select[name*="month" i]'));
+      if (year && month && /^\d{4}$/.test(year) && /^\d{1,2}$/.test(month)) {
+        return `${year}${String(month).padStart(2, '0')}`;
+      }
+      const text = document.body.innerText || '';
+      const m = text.match(/(\d{4})년\s*(\d{1,2})월/);
+      if (m) return `${m[1]}${String(m[2]).padStart(2, '0')}`;
+      return null;
+    });
+  } catch { return null; }
+}
+
 // 현재 관리비조회 IBSheet에서 선택(포커스)된 행의 동호 읽기
 // IBCellFocusedCell 이 있는 tr 에서 APT_NO_ROOM 셀 텍스트 파싱
 async function readCurrentUnit(page) {
@@ -141,6 +162,9 @@ async function runFeeCollect(residentMap, onProgress) {
   const rMap        = residentMap || {};
 
   try {
+    // 청구 년월 읽기 (ERP 화면 기준 — 수집 시점 날짜가 아닌 실제 청구월)
+    const feeYearMonth = await readFeeYearMonth(page);
+
     onProgress({ current: 0, total: 0, unit: '관리비조회 목록 읽는 중...' });
     const feeResult = await readFeeUnitList(page);
     const feeUnits  = Array.isArray(feeResult) ? feeResult : [];
@@ -222,7 +246,7 @@ async function runFeeCollect(residentMap, onProgress) {
       return { ok: false, error: '수집된 데이터가 없습니다.' };
     }
 
-    const filePath = await exportExcel(allData, outputDir);
+    const filePath = await exportExcel(allData, outputDir, feeYearMonth);
     onProgress({ current: total, total, done: true });
     return {
       ok: true, filePath,
