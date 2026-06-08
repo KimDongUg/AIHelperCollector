@@ -48,18 +48,30 @@ async function readFeeYearMonth(page) {
   try {
     const feeFrame = findFeeFrame(page);
     if (!feeFrame) return null;
-    return await feeFrame.evaluate(() => {
+    const now = new Date();
+    const curYm = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}`;
+    return await feeFrame.evaluate((curYm) => {
       const getVal = el => el?.value || el?.options?.[el?.selectedIndex]?.value || '';
       const year  = getVal(document.querySelector('select[id*="year" i],select[name*="year" i]'));
       const month = getVal(document.querySelector('select[id*="month" i],select[name*="month" i]'));
       if (year && month && /^\d{4}$/.test(year) && /^\d{1,2}$/.test(month)) {
         return `${year}${String(month).padStart(2, '0')}`;
       }
+      // 본문 텍스트에서 "YYYY년 M월" 패턴을 모두 검사하되,
+      // 오늘 날짜 표시(예: "2026년 6월 8일" 안내문구)와 같은 값은
+      // 청구월이 아닐 가능성이 높으므로 건너뛰고 다음 매치를 우선한다.
+      // (모든 매치가 오늘 날짜와 같다면 마지막 수단으로 그 값을 반환 — 어차피
+      //  타임스탬프 폴백과 같은 값이라 손해볼 게 없다)
       const text = document.body.innerText || '';
-      const m = text.match(/(\d{4})년\s*(\d{1,2})월/);
-      if (m) return `${m[1]}${String(m[2]).padStart(2, '0')}`;
-      return null;
-    });
+      const re = /(\d{4})년\s*(\d{1,2})월/g;
+      let m, fallback = null;
+      while ((m = re.exec(text))) {
+        const ym = `${m[1]}${String(parseInt(m[2], 10)).padStart(2, '0')}`;
+        if (ym !== curYm) return ym;
+        if (!fallback) fallback = ym;
+      }
+      return fallback;
+    }, curYm);
   } catch { return null; }
 }
 
@@ -121,6 +133,47 @@ async function waitForAmt(page, prevValue, maxMs = 3000) {
       { timeout: maxMs, polling: 50 }
     );
   } catch {} // timeout(같은 값인 세대) 시 그냥 진행
+}
+
+// 클릭 전 요약금액 + 상세내역(고지내역/항목별 부과내역) 텍스트 스냅샷
+// → collectFeeData()가 실제로 읽는 테이블의 내용을 직접 비교해야
+//   "새 세대 데이터로 화면이 갱신됐는지"를 보장할 수 있다.
+//   (#lbl_item_amt 값만 보면, 그 라벨은 먼저 갱신되고 상세 테이블은
+//    이전 세대 데이터를 잠깐 더 보여주는 경우를 통과시켜버려 — 인접 세대인
+//    502/503의 상세내역이 서로 뒤바뀌어 수집되는 원인이 됐다)
+async function readFeeSnapshot(page) {
+  try {
+    const f = findFeeFrame(page);
+    if (!f) return { amt: '', detail: '' };
+    return await f.evaluate(() => {
+      const amt = (document.querySelector('#lbl_item_amt')?.innerText || '').replace(/,/g, '').trim();
+      const t1 = document.querySelector('.cont_table.left.mgR5:not(.show0)');
+      const t2 = document.querySelector('.cont_table.left.mgR5.show0');
+      const detail = `${t1 ? t1.innerText : ''}|${t2 ? t2.innerText : ''}`.trim();
+      return { amt, detail };
+    });
+  } catch { return { amt: '', detail: '' }; }
+}
+
+// 클릭 후 요약금액 또는 상세내역 중 하나라도 스냅샷과 달라질 때까지 대기 (50ms 폴링)
+// → 상세내역까지 비교해야 이전 세대의 잔상 데이터를 새 데이터로 오인하지 않는다.
+async function waitForFeeRefresh(page, prevSnap, maxMs = 3000) {
+  try {
+    const f = findFeeFrame(page);
+    if (!f) return;
+    await f.waitForFunction(
+      ([selAmt, selT1, selT2, prevAmt, prevDetail]) => {
+        const amt = (document.querySelector(selAmt)?.innerText || '').replace(/,/g, '').trim();
+        const t1 = document.querySelector(selT1);
+        const t2 = document.querySelector(selT2);
+        const detail = `${t1 ? t1.innerText : ''}|${t2 ? t2.innerText : ''}`.trim();
+        if (!amt && !detail) return false;
+        return amt !== prevAmt || detail !== prevDetail;
+      },
+      ['#lbl_item_amt', '.cont_table.left.mgR5:not(.show0)', '.cont_table.left.mgR5.show0', prevSnap.amt, prevSnap.detail],
+      { timeout: maxMs, polling: 50 }
+    );
+  } catch {} // timeout(인접 세대의 상세내역이 완전히 동일한 경우) 시 그냥 진행
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -202,9 +255,9 @@ async function runFeeCollect(residentMap, onProgress) {
       onProgress({ current: i + 1, total, unit: unit.dongho });
 
       try {
-        const prevAmt = await readLblAmt(page);
+        const prevSnap = await readFeeSnapshot(page);
         await clickFeeUnit(page, unit.dong, unit.ho, i);
-        await waitForAmt(page, prevAmt);
+        await waitForFeeRefresh(page, prevSnap);
 
         // ── 동호 검증: 현재 선택된 행이 예상 동호인지 확인 ────
         // 불일치 시 ArrowDown 한 번 더 시도 → 여전히 불일치면 조용히 스킵
