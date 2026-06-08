@@ -42,6 +42,30 @@ function findFeeFrame(page) {
   return page.frames().find(f => SEL_FEE_RE.test(f.url())) || null;
 }
 
+// 현재 관리비조회 IBSheet에서 선택(포커스)된 행의 동호 읽기
+// IBCellFocusedCell 이 있는 tr 에서 APT_NO_ROOM 셀 텍스트 파싱
+async function readCurrentUnit(page) {
+  try {
+    const f = findFeeFrame(page);
+    if (!f) return null;
+    return await f.evaluate(() => {
+      const sheetA = document.querySelector('#sheetDivA');
+      if (!sheetA) return null;
+      // 포커스 셀을 포함한 행 찾기
+      for (const row of sheetA.querySelectorAll('tr.IBDataRow')) {
+        if (!row.querySelector('.IBCellFocusedCell')) continue;
+        const aptCell = row.querySelector('[class*="APT_NO_ROOM"]');
+        if (!aptCell) break;
+        const text = (aptCell.innerText || '').trim();
+        const m = text.match(/(\d{1,4})\s*[-–—]\s*(\d{1,4})/);
+        if (m) return { dong: String(parseInt(m[1])), ho: String(parseInt(m[2])) };
+        break;
+      }
+      return null;
+    });
+  } catch { return null; }
+}
+
 // 클릭 전 #lbl_item_amt 현재 값 읽기
 async function readLblAmt(page) {
   try {
@@ -141,6 +165,17 @@ async function runFeeCollect(residentMap, onProgress) {
         const prevAmt = await readLblAmt(page);
         await clickFeeUnit(page, unit.dong, unit.ho, i);
         await waitForAmt(page, prevAmt);
+
+        // ── 동호 검증: 현재 선택된 행이 예상 동호인지 확인 ────
+        const actual = await readCurrentUnit(page);
+        if (actual &&
+            (parseInt(actual.dong) !== parseInt(unit.dong) ||
+             parseInt(actual.ho)   !== parseInt(unit.ho))) {
+          const msg = `동호 불일치 — 예상: ${unit.dong}-${unit.ho}, 실제: ${actual.dong}-${actual.ho}`;
+          failedUnits.push(`${unit.dongho}(동호불일치)`);
+          saveErrorLog(logsDir, unit.dongho, msg);
+          continue;
+        }
 
         const feeData  = await collectFeeData(page);
         const resident = rMap[`${unit.dong}-${unit.ho}`] || {};
