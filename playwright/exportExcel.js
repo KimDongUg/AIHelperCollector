@@ -14,7 +14,7 @@ function getYYYYMM() {
   return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}`;
 }
 
-async function exportExcel(data, outputDir, feeYearMonth) {
+async function exportExcel(data, outputDir) {
   if (!data || !data.length) throw new Error('내보낼 데이터가 없습니다.');
 
   // 동적 컬럼: 고정 컬럼 이후 모든 키 수집 (첫 데이터 행 기준)
@@ -64,11 +64,7 @@ async function exportExcel(data, outputDir, feeYearMonth) {
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, '관리비');
 
-  // 파일명에 청구 년월(YYYYMM)을 담아 보냄 — 서버가 이 값을 그대로 year_month로 저장한다.
-  // ERP 화면에서 읽은 실제 청구월(feeYearMonth)을 우선 사용하고,
-  // 읽기 실패 시에만 수집 시점의 달로 대체한다.
-  const ym = (feeYearMonth && /^\d{6}$/.test(feeYearMonth)) ? feeYearMonth : getYYYYMM();
-  const filename = `관리비데이터_${ym}.xlsx`;
+  const filename = `관리비데이터_${getYYYYMM()}.xlsx`;
   const filePath = path.join(outputDir, filename);
   XLSX.writeFile(wb, filePath);
   return filePath;

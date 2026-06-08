@@ -42,63 +42,6 @@ function findFeeFrame(page) {
   return page.frames().find(f => SEL_FEE_RE.test(f.url())) || null;
 }
 
-// ERP 관리비조회 화면에서 청구 년월(YYYYMM) 읽기
-// 년월 선택 select 또는 페이지 텍스트에서 "YYYY년 MM월" 파싱
-async function readFeeYearMonth(page) {
-  try {
-    const feeFrame = findFeeFrame(page);
-    if (!feeFrame) return null;
-    const now = new Date();
-    const curYm = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}`;
-    return await feeFrame.evaluate((curYm) => {
-      const getVal = el => el?.value || el?.options?.[el?.selectedIndex]?.value || '';
-      const year  = getVal(document.querySelector('select[id*="year" i],select[name*="year" i]'));
-      const month = getVal(document.querySelector('select[id*="month" i],select[name*="month" i]'));
-      if (year && month && /^\d{4}$/.test(year) && /^\d{1,2}$/.test(month)) {
-        return `${year}${String(month).padStart(2, '0')}`;
-      }
-      // 본문 텍스트에서 "YYYY년 M월" 패턴을 모두 검사하되,
-      // 오늘 날짜 표시(예: "2026년 6월 8일" 안내문구)와 같은 값은
-      // 청구월이 아닐 가능성이 높으므로 건너뛰고 다음 매치를 우선한다.
-      // (모든 매치가 오늘 날짜와 같다면 마지막 수단으로 그 값을 반환 — 어차피
-      //  타임스탬프 폴백과 같은 값이라 손해볼 게 없다)
-      const text = document.body.innerText || '';
-      const re = /(\d{4})년\s*(\d{1,2})월/g;
-      let m, fallback = null;
-      while ((m = re.exec(text))) {
-        const ym = `${m[1]}${String(parseInt(m[2], 10)).padStart(2, '0')}`;
-        if (ym !== curYm) return ym;
-        if (!fallback) fallback = ym;
-      }
-      return fallback;
-    }, curYm);
-  } catch { return null; }
-}
-
-// 현재 관리비조회 IBSheet에서 선택(포커스)된 행의 동호 읽기
-// IBCellFocusedCell 이 있는 tr 에서 APT_NO_ROOM 셀 텍스트 파싱
-async function readCurrentUnit(page) {
-  try {
-    const f = findFeeFrame(page);
-    if (!f) return null;
-    return await f.evaluate(() => {
-      const sheetA = document.querySelector('#sheetDivA');
-      if (!sheetA) return null;
-      // 포커스 셀을 포함한 행 찾기
-      for (const row of sheetA.querySelectorAll('tr.IBDataRow')) {
-        if (!row.querySelector('.IBCellFocusedCell')) continue;
-        const aptCell = row.querySelector('[class*="APT_NO_ROOM"]');
-        if (!aptCell) break;
-        const text = (aptCell.innerText || '').trim();
-        const m = text.match(/(\d{1,4})\s*[-–—]\s*(\d{1,4})/);
-        if (m) return { dong: String(parseInt(m[1])), ho: String(parseInt(m[2])) };
-        break;
-      }
-      return null;
-    });
-  } catch { return null; }
-}
-
 // 클릭 전 #lbl_item_amt 현재 값 읽기
 async function readLblAmt(page) {
   try {
@@ -133,51 +76,6 @@ async function waitForAmt(page, prevValue, maxMs = 3000) {
       { timeout: maxMs, polling: 50 }
     );
   } catch {} // timeout(같은 값인 세대) 시 그냥 진행
-}
-
-// 클릭 전 요약금액 + 상세내역(고지내역/항목별 부과내역) 텍스트 스냅샷
-// → collectFeeData()가 실제로 읽는 테이블의 내용을 직접 비교해야
-//   "새 세대 데이터로 화면이 갱신됐는지"를 보장할 수 있다.
-//   (#lbl_item_amt 값만 보면, 그 라벨은 먼저 갱신되고 상세 테이블은
-//    이전 세대 데이터를 잠깐 더 보여주는 경우를 통과시켜버려 — 인접 세대인
-//    502/503의 상세내역이 서로 뒤바뀌어 수집되는 원인이 됐다)
-async function readFeeSnapshot(page) {
-  try {
-    const f = findFeeFrame(page);
-    if (!f) return { amt: '', detail: '' };
-    return await f.evaluate(() => {
-      // textContent — innerText와 달리 강제 레이아웃(reflow)을 유발하지 않아
-      // 50ms 간격 폴링에서도 가볍다 (innerText는 호출마다 강제 리플로우 발생 →
-      // 큰 표 2개를 매 폴링마다 읽으면서 화면 자체가 느려져 세대당 수집 시간이
-      // 370ms → 2초대로 늘어나는 원인이 됐다)
-      const amt = (document.querySelector('#lbl_item_amt')?.textContent || '').replace(/,/g, '').trim();
-      const t1 = document.querySelector('.cont_table.left.mgR5:not(.show0)');
-      const t2 = document.querySelector('.cont_table.left.mgR5.show0');
-      const detail = `${t1 ? t1.textContent : ''}|${t2 ? t2.textContent : ''}`.trim();
-      return { amt, detail };
-    });
-  } catch { return { amt: '', detail: '' }; }
-}
-
-// 클릭 후 요약금액 또는 상세내역 중 하나라도 스냅샷과 달라질 때까지 대기 (50ms 폴링)
-// → 상세내역까지 비교해야 이전 세대의 잔상 데이터를 새 데이터로 오인하지 않는다.
-async function waitForFeeRefresh(page, prevSnap, maxMs = 3000) {
-  try {
-    const f = findFeeFrame(page);
-    if (!f) return;
-    await f.waitForFunction(
-      ([selAmt, selT1, selT2, prevAmt, prevDetail]) => {
-        const amt = (document.querySelector(selAmt)?.textContent || '').replace(/,/g, '').trim();
-        const t1 = document.querySelector(selT1);
-        const t2 = document.querySelector(selT2);
-        const detail = `${t1 ? t1.textContent : ''}|${t2 ? t2.textContent : ''}`.trim();
-        if (!amt && !detail) return false;
-        return amt !== prevAmt || detail !== prevDetail;
-      },
-      ['#lbl_item_amt', '.cont_table.left.mgR5:not(.show0)', '.cont_table.left.mgR5.show0', prevSnap.amt, prevSnap.detail],
-      { timeout: maxMs, polling: 50 }
-    );
-  } catch {} // timeout(인접 세대의 상세내역이 완전히 동일한 경우) 시 그냥 진행
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -219,9 +117,6 @@ async function runFeeCollect(residentMap, onProgress) {
   const rMap        = residentMap || {};
 
   try {
-    // 청구 년월 읽기 (ERP 화면 기준 — 수집 시점 날짜가 아닌 실제 청구월)
-    const feeYearMonth = await readFeeYearMonth(page);
-
     onProgress({ current: 0, total: 0, unit: '관리비조회 목록 읽는 중...' });
     const feeResult = await readFeeUnitList(page);
     const feeUnits  = Array.isArray(feeResult) ? feeResult : [];
@@ -235,22 +130,6 @@ async function runFeeCollect(residentMap, onProgress) {
     }
 
     const total = feeUnits.length;
-
-    // ── 첫 행 자동 클릭 — 사용자 수동 클릭 불필요 ────────────
-    // IBSheet ArrowDown이 동작하려면 .IBCellFocusedCell 상태 필요.
-    // 수집 시작 전 첫 번째 IBDataRow를 Playwright locator.click()으로
-    // 자동 선택해 포커스를 확보한다.
-    try {
-      const feeFrame = findFeeFrame(page);
-      if (feeFrame) {
-        onProgress({ current: 0, total, unit: '첫 행 자동 선택 중...' });
-        const prevFirst = await readLblAmt(page);
-        await feeFrame.locator('#sheetDivA tr.IBDataRow').first().click();
-        await waitForAmt(page, prevFirst, 4000);
-        await page.waitForTimeout(200); // 렌더링 안정화
-      }
-    } catch {}
-
     onProgress({ current: 0, total, unit: '수집 시작' });
 
     for (let i = 0; i < feeUnits.length; i++) {
@@ -259,30 +138,9 @@ async function runFeeCollect(residentMap, onProgress) {
       onProgress({ current: i + 1, total, unit: unit.dongho });
 
       try {
-        const prevSnap = await readFeeSnapshot(page);
+        const prevAmt = await readLblAmt(page);
         await clickFeeUnit(page, unit.dong, unit.ho, i);
-        await waitForFeeRefresh(page, prevSnap);
-
-        // ── 동호 검증: 현재 선택된 행이 예상 동호인지 확인 ────
-        // 불일치 시 ArrowDown 한 번 더 시도 → 여전히 불일치면 조용히 스킵
-        const actual = await readCurrentUnit(page);
-        if (actual &&
-            (parseInt(actual.dong) !== parseInt(unit.dong) ||
-             parseInt(actual.ho)   !== parseInt(unit.ho))) {
-          // 한 번 더 이동 후 재확인
-          await page.keyboard.press('ArrowDown');
-          await page.waitForTimeout(200);
-          const actual2 = await readCurrentUnit(page);
-          if (!actual2 ||
-              parseInt(actual2.dong) !== parseInt(unit.dong) ||
-              parseInt(actual2.ho)   !== parseInt(unit.ho)) {
-            // 복구 실패 → 로그 파일에만 기록, UI 실패 목록 미포함
-            saveErrorLog(logsDir, unit.dongho,
-              `동호 불일치 skip — 예상: ${unit.dong}-${unit.ho}, 실제: ${actual2?.dong}-${actual2?.ho}`);
-            continue;
-          }
-          // 복구 성공 → 정상 진행
-        }
+        await waitForAmt(page, prevAmt);
 
         const feeData  = await collectFeeData(page);
         const resident = rMap[`${unit.dong}-${unit.ho}`] || {};
@@ -303,7 +161,7 @@ async function runFeeCollect(residentMap, onProgress) {
       return { ok: false, error: '수집된 데이터가 없습니다.' };
     }
 
-    const filePath = await exportExcel(allData, outputDir, feeYearMonth);
+    const filePath = await exportExcel(allData, outputDir);
     onProgress({ current: total, total, done: true });
     return {
       ok: true, filePath,
@@ -696,8 +554,8 @@ async function collectFeeData(page) {
         for (let i = 0; i + 1 < cells.length; i += 2) {
           const key = cells[i].innerText.trim();
           const val = txt(cells[i + 1]);
-          // 빈 키, 숫자 전용 키(순번), IBSheet 셀 ID(A5/B6 형태), 헤더 스킵 키, 비정상 길이 제외
-          if (!key || /^\d+$/.test(key) || /^[A-Z]\d+$/.test(key) || key.length > 30 || skipKeys.includes(key)) continue;
+          // 빈 키, 숫자 전용 키(순번/IBSheet 인덱스), 헤더 스킵 키, 비정상 길이 제외
+          if (!key || /^\d+$/.test(key) || key.length > 30 || skipKeys.includes(key)) continue;
           if (NODATA_MSGS.some(m => val.includes(m))) continue;
           data[prefix ? `${prefix}_${key}` : key] = val;
         }
@@ -732,24 +590,13 @@ async function collectFeeData(page) {
       ['할인항목명', '항목', '순번', '신청일자', '적용할인금액', '건수', '할인일자', '합계', '']
     );
 
-    // ── 항목별 부과내역 — (항목명|금액|구분) 3열 구조 ──────────
-    // 구분(과/비)은 width:0px 숨김 컬럼 → 모든 TD에서 3개씩 읽음
-    const show0 = document.querySelector('.cont_table.left.mgR5.show0');
-    if (show0) {
-      for (const row of dataRows(show0)) {
-        const allTds = Array.from(row.querySelectorAll('td'));
-        if (allTds.length === 1 && NODATA_MSGS.some(m => allTds[0].innerText.includes(m))) continue;
-        for (let i = 0; i + 2 < allTds.length; i += 3) {
-          const name = (allTds[i].innerText || '').trim();
-          const amt  = txt(allTds[i + 1]);
-          const div  = (allTds[i + 2].innerText || '').trim();
-          if (!name || /^\d+$/.test(name) || /^[A-Z]\d+$/.test(name) ||
-              name.length > 30 || ['항목명','항목','금액','합계','구분',''].includes(name)) continue;
-          data[`항목_${name}`] = amt;
-          if (div === '과' || div === '비') data[`항목구분_${name}`] = div;
-        }
-      }
-    }
+    // ── 항목별 부과내역 (세대별 상세 항목) ─────────────────────
+    // prefix '항목_' 로 구분 — 고지내역 요약과 키 충돌 방지
+    extractPairs(
+      document.querySelector('.cont_table.left.mgR5.show0'),
+      '항목',
+      ['항목명', '항목', '금액', '합계', '']
+    );
 
     // ── 항목별 부과 — ID 요약값 ──────────────────────────────
     const itemAmt = document.querySelector('#lbl_item_amt');

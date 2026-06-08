@@ -1,6 +1,6 @@
 {
   "name": "aihelper-collector",
-  "version": "5.15.7",
+  "version": "5.15.8",
   "description": "AI Helper ERP 부과내역서 엑셀데이터 자동 생성기",
   "main": "electron/main.js",
   "scripts": {
