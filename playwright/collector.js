@@ -146,10 +146,14 @@ async function readFeeSnapshot(page) {
     const f = findFeeFrame(page);
     if (!f) return { amt: '', detail: '' };
     return await f.evaluate(() => {
-      const amt = (document.querySelector('#lbl_item_amt')?.innerText || '').replace(/,/g, '').trim();
+      // textContent — innerText와 달리 강제 레이아웃(reflow)을 유발하지 않아
+      // 50ms 간격 폴링에서도 가볍다 (innerText는 호출마다 강제 리플로우 발생 →
+      // 큰 표 2개를 매 폴링마다 읽으면서 화면 자체가 느려져 세대당 수집 시간이
+      // 370ms → 2초대로 늘어나는 원인이 됐다)
+      const amt = (document.querySelector('#lbl_item_amt')?.textContent || '').replace(/,/g, '').trim();
       const t1 = document.querySelector('.cont_table.left.mgR5:not(.show0)');
       const t2 = document.querySelector('.cont_table.left.mgR5.show0');
-      const detail = `${t1 ? t1.innerText : ''}|${t2 ? t2.innerText : ''}`.trim();
+      const detail = `${t1 ? t1.textContent : ''}|${t2 ? t2.textContent : ''}`.trim();
       return { amt, detail };
     });
   } catch { return { amt: '', detail: '' }; }
@@ -163,10 +167,10 @@ async function waitForFeeRefresh(page, prevSnap, maxMs = 3000) {
     if (!f) return;
     await f.waitForFunction(
       ([selAmt, selT1, selT2, prevAmt, prevDetail]) => {
-        const amt = (document.querySelector(selAmt)?.innerText || '').replace(/,/g, '').trim();
+        const amt = (document.querySelector(selAmt)?.textContent || '').replace(/,/g, '').trim();
         const t1 = document.querySelector(selT1);
         const t2 = document.querySelector(selT2);
-        const detail = `${t1 ? t1.innerText : ''}|${t2 ? t2.innerText : ''}`.trim();
+        const detail = `${t1 ? t1.textContent : ''}|${t2 ? t2.textContent : ''}`.trim();
         if (!amt && !detail) return false;
         return amt !== prevAmt || detail !== prevDetail;
       },
