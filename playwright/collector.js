@@ -651,13 +651,24 @@ async function collectFeeData(page) {
       ['할인항목명', '항목', '순번', '신청일자', '적용할인금액', '건수', '할인일자', '합계', '']
     );
 
-    // ── 항목별 부과내역 (세대별 상세 항목) ─────────────────────
-    // prefix '항목_' 로 구분 — 고지내역 요약과 키 충돌 방지
-    extractPairs(
-      document.querySelector('.cont_table.left.mgR5.show0'),
-      '항목',
-      ['항목명', '항목', '금액', '합계', '']
-    );
+    // ── 항목별 부과내역 — (항목명|금액|구분) 3열 구조 ──────────
+    // 구분(과/비)은 width:0px 숨김 컬럼 → 모든 TD에서 3개씩 읽음
+    const show0 = document.querySelector('.cont_table.left.mgR5.show0');
+    if (show0) {
+      for (const row of dataRows(show0)) {
+        const allTds = Array.from(row.querySelectorAll('td'));
+        if (allTds.length === 1 && NODATA_MSGS.some(m => allTds[0].innerText.includes(m))) continue;
+        for (let i = 0; i + 2 < allTds.length; i += 3) {
+          const name = (allTds[i].innerText || '').trim();
+          const amt  = txt(allTds[i + 1]);
+          const div  = (allTds[i + 2].innerText || '').trim();
+          if (!name || /^\d+$/.test(name) || /^[A-Z]\d+$/.test(name) ||
+              name.length > 30 || ['항목명','항목','금액','합계','구분',''].includes(name)) continue;
+          data[`항목_${name}`] = amt;
+          if (div === '과' || div === '비') data[`항목구분_${name}`] = div;
+        }
+      }
+    }
 
     // ── 항목별 부과 — ID 요약값 ──────────────────────────────
     const itemAmt = document.querySelector('#lbl_item_amt');
