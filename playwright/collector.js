@@ -13,7 +13,6 @@
  *
  * 섹션 셀렉터:
  *   입주자현황       : .cont_table
- *   입주등록 (면적)  : URL 불명확 — EUSE_PYONG 필드로 IBSheet 탐색
  *   동호내역 (목록)  : .cont_table.left
  *   고지내역         : .cont_table.left.mgR5  (show0 제외)
  *   검침내역         : .cont_table.sheetDTap
@@ -80,7 +79,7 @@ async function waitForAmt(page, prevValue, maxMs = 3000) {
 }
 
 /* ═══════════════════════════════════════════════════════════
- *  STEP 1: 입주자현황 수집 → 이름/휴대폰 맵 반환
+ *  STEP 1: 입주자현황 수집 → 이름/휴대폰/전용면적 맵 반환
  * ═══════════════════════════════════════════════════════════ */
 async function runResidentCollect(onProgress) {
   stopFlag = false;
@@ -102,92 +101,10 @@ async function runResidentCollect(onProgress) {
 }
 
 /* ═══════════════════════════════════════════════════════════
- *  STEP 2: 입주등록 수집 → 동/호 → 전용면적 맵 반환
- *
- *  입주등록 화면 IBSheet 컬럼 (관리비조회/입주자현황과 다른 화면):
- *    PRT_APT_NO   : 동
- *    PRT_APT_ROOM : 호
- *    SELL_PYONG   : 분양면적
- *    EUSE_PYONG   : 전용면적
- *
- *  URL 패턴이 불명확하므로 SEL_FEE/SEL_RESIDENT 같은 고정 셀렉터 대신
- *  모든 frame을 순회하며 EUSE_PYONG 필드를 가진 IBSheet를 탐색한다.
+ *  STEP 2: 관리비 수집 → 엑셀 생성
+ *  residentMap: step 1에서 수집한 이름/휴대폰/전용면적 맵 (없으면 빈 객체)
  * ═══════════════════════════════════════════════════════════ */
-function extractAreaMapFromFrame() {
-  const gv = v => {
-    if (v == null) return '';
-    if (typeof v === 'string') return v.trim();
-    try { return String(v.innerText ?? v.textContent ?? '').trim(); } catch { return ''; }
-  };
-
-  const container = window.IBSheet;
-  if (!container) return {};
-  const indices = Array.isArray(container)
-    ? container.map((_, i) => i)
-    : Object.keys(container).filter(k => /^\d+$/.test(k)).map(Number);
-
-  for (const i of indices) {
-    const sheet = container[i];
-    if (!sheet || !sheet.Rows || typeof sheet.Rows !== 'object') continue;
-
-    const arKeys = Object.keys(sheet.Rows).filter(k => /^AR\d+$/.test(k));
-    if (!arKeys.length) continue;
-
-    const sample = sheet.Rows[arKeys[0]];
-    if (!sample || !('EUSE_PYONG' in sample)) continue; // 입주등록 시트가 아님
-
-    const result = {};
-    for (const key of arKeys) {
-      const row = sheet.Rows[key];
-      if (!row) continue;
-      const dong = gv(row['PRT_APT_NO']);
-      const ho   = gv(row['PRT_APT_ROOM']);
-      if (!dong || !ho) continue;
-      result[`${dong}-${ho}`] = {
-        sellArea: gv(row['SELL_PYONG']),
-        exclusiveArea: gv(row['EUSE_PYONG']),
-      };
-    }
-    if (Object.keys(result).length) return result;
-  }
-  return {};
-}
-
-async function readUnitAreaData(page) {
-  for (const f of page.frames()) {
-    try {
-      const result = await f.evaluate(extractAreaMapFromFrame);
-      if (result && Object.keys(result).length) return result;
-    } catch {}
-  }
-  return {};
-}
-
-async function runAreaCollect(onProgress) {
-  stopFlag = false;
-  try {
-    const page = await getPage();
-    onProgress({ text: '입주등록 면적정보 읽는 중...' });
-    const map = await readUnitAreaData(page);
-    const count = Object.keys(map).length;
-    if (count === 0) {
-      return {
-        ok: false,
-        error: '입주등록 면적정보를 읽지 못했습니다.\nXpERP 입주등록 탭을 열고 첫 번째 행을 클릭한 뒤 다시 시도하세요.',
-      };
-    }
-    return { ok: true, count, map };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-}
-
-/* ═══════════════════════════════════════════════════════════
- *  STEP 3: 관리비 수집 → 엑셀 생성
- *  residentMap: step 1에서 수집한 이름/휴대폰 맵 (없으면 빈 객체)
- *  areaMap    : step 2에서 수집한 전용면적 맵 (없으면 빈 객체)
- * ═══════════════════════════════════════════════════════════ */
-async function runFeeCollect(residentMap, areaMap, onProgress) {
+async function runFeeCollect(residentMap, onProgress) {
   stopFlag = false;
   const page      = await getPage();
   const outputDir = path.join(__dirname, '..', 'output');
@@ -198,7 +115,6 @@ async function runFeeCollect(residentMap, areaMap, onProgress) {
   const allData     = [];
   const failedUnits = [];
   const rMap        = residentMap || {};
-  const aMap        = areaMap || {};
 
   try {
     onProgress({ current: 0, total: 0, unit: '관리비조회 목록 읽는 중...' });
@@ -229,13 +145,12 @@ async function runFeeCollect(residentMap, areaMap, onProgress) {
 
         const feeData  = await collectFeeData(page);
         const resident = rMap[`${unit.dong}-${unit.ho}`] || {};
-        const area     = aMap[`${unit.dong}-${unit.ho}`] || {};
 
         allData.push({
           dong: unit.dong, ho: unit.ho,
           name: resident.name || unit.name || '',
           phone: resident.phone || unit.phone || '',
-          전용면적: area.exclusiveArea || '',
+          전용면적: resident.exclusiveArea || '',
           ...feeData,
         });
       } catch (err) {
@@ -345,14 +260,16 @@ async function readResidentData(page) {
     }
   } catch {}
 
-  // ── Phase 3: IBSheet.Rows / GetCellValue로 전체 846행 phone 보완 ────────
+  // ── Phase 3: IBSheet.Rows / GetCellValue로 전체 846행 phone+면적 보완 ────────
   // 확인된 컬럼 ID (XpERP occp_020m02 입주자현황):
   //   PRT_APT_NO      : 동 ("1")
   //   PRT_APT_ROOM    : 호 ("101")
   //   I_MOBILE_TEL_NO1: 입주자 휴대폰 ("010-xxxx-xxxx")
   //   S_MOBILE_TEL_NO1: 소유주 휴대폰 (fallback)
+  //   SELL_PYONG      : 분양면적 ("57.853")
+  //   EUSE_PYONG      : 전용면적 ("34.78")
   try {
-    const phoneMap = await resFrame.evaluate(() => {
+    const extraMap = await resFrame.evaluate(() => {
       const RE_PHONE = /^01[0-9]\d{7,8}$/;
       const container = document.querySelector('.cont_table');
       if (!container) return {};
@@ -385,7 +302,11 @@ async function readResidentData(page) {
             const dk = `${parseInt(dong)}-${parseInt(ho)}`;
             let ph = gv(row['I_MOBILE_TEL_NO1']).replace(/[-.\s]/g, '');
             if (!RE_PHONE.test(ph)) ph = gv(row['S_MOBILE_TEL_NO1']).replace(/[-.\s]/g, '');
-            if (RE_PHONE.test(ph)) result[dk] = ph;
+            result[dk] = {
+              phone: RE_PHONE.test(ph) ? ph : '',
+              sellArea: gv(row['SELL_PYONG']),
+              exclusiveArea: gv(row['EUSE_PYONG']),
+            };
           } catch {}
         }
         if (Object.keys(result).length > 0) return result;
@@ -405,15 +326,24 @@ async function readResidentData(page) {
           const dk = `${parseInt(dong)}-${parseInt(ho)}`;
           let ph = String(gcv(r, 'I_MOBILE_TEL_NO1') || '').replace(/[-.\s]/g, '');
           if (!RE_PHONE.test(ph)) ph = String(gcv(r, 'S_MOBILE_TEL_NO1') || '').replace(/[-.\s]/g, '');
-          if (RE_PHONE.test(ph)) result[dk] = ph;
+          result[dk] = {
+            phone: RE_PHONE.test(ph) ? ph : '',
+            sellArea: String(gcv(r, 'SELL_PYONG') || '').trim(),
+            exclusiveArea: String(gcv(r, 'EUSE_PYONG') || '').trim(),
+          };
         } catch {}
       }
       return result;
     });
 
-    for (const [dk, ph] of Object.entries(phoneMap)) {
-      if (map[dk]) map[dk].phone = map[dk].phone || ph;
-      else         map[dk] = { name: '', phone: ph };
+    for (const [dk, extra] of Object.entries(extraMap)) {
+      if (map[dk]) {
+        map[dk].phone         = map[dk].phone || extra.phone;
+        map[dk].exclusiveArea = map[dk].exclusiveArea || extra.exclusiveArea;
+        map[dk].sellArea      = map[dk].sellArea || extra.sellArea;
+      } else {
+        map[dk] = { name: '', phone: extra.phone, exclusiveArea: extra.exclusiveArea, sellArea: extra.sellArea };
+      }
     }
   } catch {}
 
@@ -756,4 +686,4 @@ async function collectFeeData(page) {
   return {};
 }
 
-module.exports = { runResidentCollect, runAreaCollect, runFeeCollect, stopCollect };
+module.exports = { runResidentCollect, runFeeCollect, stopCollect };
