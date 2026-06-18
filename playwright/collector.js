@@ -209,10 +209,13 @@ function collectVisible(lastDong) {
     const phone = allTds
       .map(td => (td.textContent || '').split('\n')[0].trim().replace(/[-.\s]/g, ''))
       .find(v => RE_PHONE.test(v)) || '';
+    // 전용면적: 컬럼 클래스명(HideCol0EUSE_PYONG)으로 직접 탐색 (IBSheet.Rows 접근보다 안정적)
+    const areaTd = row.querySelector('[class*="EUSE_PYONG"]');
+    const exclusiveArea = areaTd ? (areaTd.innerText || areaTd.textContent || '').split('\n')[0].trim() : '';
     if (/^\d{1,2}$/.test(c0) && /^\d{2,4}$/.test(c1)) {
-      ld = c0; rows.push({ dk: `${c0}-${c1}`, name, phone });
+      ld = c0; rows.push({ dk: `${c0}-${c1}`, name, phone, exclusiveArea });
     } else if (/^\d{2,4}$/.test(c0) && ld) {
-      rows.push({ dk: `${ld}-${c0}`, name, phone });
+      rows.push({ dk: `${ld}-${c0}`, name, phone, exclusiveArea });
     }
   }
   return { rows, lastDong: ld };
@@ -229,8 +232,12 @@ async function readResidentData(page) {
   const { rows: visRows, lastDong: initLastDong } = await resFrame.evaluate(collectVisible, '');
 
   for (const r of visRows) {
-    if (!map[r.dk]) map[r.dk] = { name: r.name, phone: r.phone };
-    else if (r.phone && !map[r.dk].phone) map[r.dk].phone = r.phone;
+    if (!map[r.dk]) {
+      map[r.dk] = { name: r.name, phone: r.phone, exclusiveArea: r.exclusiveArea };
+    } else {
+      if (r.phone && !map[r.dk].phone) map[r.dk].phone = r.phone;
+      if (r.exclusiveArea && !map[r.dk].exclusiveArea) map[r.dk].exclusiveArea = r.exclusiveArea;
+    }
   }
 
   // ── Phase 2: PageDown 키보드 네비게이션으로 전체 행 수집 ────────
@@ -249,8 +256,12 @@ async function readResidentData(page) {
       const { rows, lastDong: ld } = await resFrame.evaluate(collectVisible, lastDong);
       lastDong = ld;
       for (const r of rows) {
-        if (!map[r.dk])                       map[r.dk] = { name: r.name, phone: r.phone };
-        else if (r.phone && !map[r.dk].phone) map[r.dk].phone = r.phone;
+        if (!map[r.dk]) {
+          map[r.dk] = { name: r.name, phone: r.phone, exclusiveArea: r.exclusiveArea };
+        } else {
+          if (r.phone && !map[r.dk].phone) map[r.dk].phone = r.phone;
+          if (r.exclusiveArea && !map[r.dk].exclusiveArea) map[r.dk].exclusiveArea = r.exclusiveArea;
+        }
       }
 
       const newSize = Object.keys(map).length;
