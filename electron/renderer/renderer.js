@@ -1,6 +1,7 @@
 let lastExcelPath = null;
 let isCollecting  = false;
 let residentDone  = false;
+let areaDone      = false;
 
 const erpUrlInput         = document.getElementById('erpUrl');
 const cdpPortInput        = document.getElementById('cdpPort');
@@ -9,6 +10,8 @@ const btnConnectERP       = document.getElementById('btnConnectERP');
 const connectStatus       = document.getElementById('connectStatus');
 const btnCollectResident  = document.getElementById('btnCollectResident');
 const residentStatus      = document.getElementById('residentStatus');
+const btnCollectArea      = document.getElementById('btnCollectArea');
+const areaStatus          = document.getElementById('areaStatus');
 const btnStart            = document.getElementById('btnStart');
 const btnStop             = document.getElementById('btnStop');
 const btnOpenExcel        = document.getElementById('btnOpenExcel');
@@ -45,6 +48,7 @@ function hideConnectStatus() {
 function setCollectingUI(collecting) {
   isCollecting = collecting;
   btnCollectResident.disabled = collecting || !residentDone === false; // ERP 연결 여부로 제어
+  btnCollectArea.disabled     = collecting;
   btnStart.disabled  = collecting || !residentDone;
   btnStop.style.display  = collecting ? 'block' : 'none';
   btnStop.disabled       = !collecting;
@@ -91,6 +95,7 @@ btnConnectERP.addEventListener('click', async () => {
   if (result.ok) {
     showConnectStatus('success', '✅ 현재 로그인된 ERP 연결 완료');
     btnCollectResident.disabled = false;
+    btnCollectArea.disabled = false;
     setStatus('green', 'ERP 연결됨 — ① 입주자현황 수집부터 시작하세요.');
   } else if (result.error === 'no_browser') {
     showConnectStatus('error', '❌ ERP 브라우저를 먼저 실행해주세요');
@@ -122,7 +127,7 @@ btnCollectResident.addEventListener('click', async () => {
     residentStatus.style.display = 'block';
     residentStatus.textContent = `✅ 입주자 ${result.count}명 수집 완료`;
     btnStart.disabled = false;
-    setStatus('green', `입주자 ${result.count}명 수집 완료 — ② 관리비 수집을 시작하세요.`);
+    setStatus('green', `입주자 ${result.count}명 수집 완료 — ② 입주등록(면적) 수집을 진행하세요.`);
   } else {
     residentDone = false;
     residentStatus.style.display = 'block';
@@ -133,7 +138,36 @@ btnCollectResident.addEventListener('click', async () => {
   }
 });
 
-// ② 관리비 수집 시작
+// ② 입주등록 수집 (전용면적)
+btnCollectArea.addEventListener('click', async () => {
+  btnCollectArea.disabled = true;
+  btnCollectArea.textContent = '② 입주등록 수집 중...';
+  areaStatus.style.display = 'none';
+  setStatus('blue', '입주등록(면적) 수집 중...');
+
+  const result = await window.api.collectArea();
+
+  btnCollectArea.disabled = false;
+  btnCollectArea.textContent = '② 입주등록 수집 (전용면적)';
+
+  if (result.ok) {
+    areaDone = true;
+    areaStatus.style.display = 'block';
+    areaStatus.style.background = '#e8f5e9';
+    areaStatus.style.color = '#2e7d32';
+    areaStatus.textContent = `✅ ${result.count}세대 면적정보 수집 완료`;
+    setStatus('green', `면적정보 ${result.count}세대 수집 완료 — ③ 관리비 수집을 시작하세요.`);
+  } else {
+    areaDone = false;
+    areaStatus.style.display = 'block';
+    areaStatus.style.background = '#ffebee';
+    areaStatus.style.color = '#c62828';
+    areaStatus.textContent = '❌ ' + (result.error || '수집 실패');
+    setStatus('red', '입주등록(면적) 수집 실패');
+  }
+});
+
+// ③ 관리비 수집 시작
 btnStart.addEventListener('click', async () => {
   setCollectingUI(true);
   btnStart.style.display = 'none';

@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('api', {
   openErpBrowser: (port, erpUrl) => ipcRenderer.invoke('open-erp-browser', port, erpUrl),
   connectERP: (port) => ipcRenderer.invoke('connect-erp', port),
   collectResident: () => ipcRenderer.invoke('collect-resident'),
+  collectArea: () => ipcRenderer.invoke('collect-area'),
   startCollect: () => ipcRenderer.invoke('start-collect'),
   stopCollect: () => ipcRenderer.invoke('stop-collect'),
   openExcel: (filePath) => ipcRenderer.invoke('open-excel', filePath),

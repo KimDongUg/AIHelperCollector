@@ -183,7 +183,7 @@
 
 <div class="header">
   <h1>AI Helper 수집기</h1>
-  <p>부과내역서 엑셀데이터 자동 생성기 v5.16.0</p>
+  <p>부과내역서 엑셀데이터 자동 생성기 v5.17.0</p>
 </div>
 
 <div class="body">
@@ -208,7 +208,7 @@
 
     <div class="connect-status" id="connectStatus"></div>
 
-    <p class="hint">수집은 2단계로 진행합니다.<br><b>[1단계]</b> XpERP → 입주자현황 탭 → 개인정보 표시 체크 → ① 버튼<br><b>[2단계]</b> XpERP → 관리비조회 탭 → 개인정보 표시 체크 → 1-101 클릭 → ② 버튼</p>
+    <p class="hint">수집은 3단계로 진행합니다.<br><b>[1단계]</b> XpERP → 입주자현황 탭 → 개인정보 표시 체크 → ① 버튼<br><b>[2단계]</b> XpERP → 입주등록 탭 → 첫 번째 행 클릭 → ② 버튼<br><b>[3단계]</b> XpERP → 관리비조회 탭 → 개인정보 표시 체크 → 1-101 클릭 → ③ 버튼</p>
   </div>
 
   <!-- 수집 제어 -->
@@ -222,8 +222,14 @@
     </div>
 
     <!-- Step 2 -->
+    <div style="margin-bottom:10px">
+      <button class="btn btn-outline" id="btnCollectArea" disabled style="width:100%; padding:11px; font-size:13.5px">② 입주등록 수집 (전용면적)</button>
+      <div id="areaStatus" style="display:none; margin-top:7px; padding:8px 12px; background:#e8f5e9; border-radius:7px; font-size:12.5px; color:#2e7d32; font-weight:600"></div>
+    </div>
+
+    <!-- Step 3 -->
     <div>
-      <button class="btn btn-success" id="btnStart" disabled style="font-size:13.5px">② 관리비 수집 시작</button>
+      <button class="btn btn-success" id="btnStart" disabled style="font-size:13.5px">③ 관리비 수집 시작</button>
       <button class="btn btn-danger" id="btnStop" disabled style="margin-top:8px; display:none">수집 중단</button>
     </div>
 

@@ -6,6 +6,7 @@ require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 let mainWindow;
 let storedResidentMap = null; // 1단계 수집 결과 보관
+let storedAreaMap     = null; // 2단계 수집 결과 보관 (전용면적)
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -92,14 +93,28 @@ ipcMain.handle('collect-resident', async () => {
   }
 });
 
-// 2단계: 관리비 수집
+// 2단계: 입주등록(면적정보) 수집
+ipcMain.handle('collect-area', async () => {
+  const { runAreaCollect } = require('../playwright/collector');
+  try {
+    const result = await runAreaCollect((progress) => {
+      mainWindow.webContents.send('progress-update', progress);
+    });
+    if (result.ok) storedAreaMap = result.map;
+    return { ok: result.ok, count: result.count, error: result.error };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+// 3단계: 관리비 수집
 ipcMain.handle('start-collect', async () => {
   const { runFeeCollect } = require('../playwright/collector');
   try {
     const outputDir = path.join(__dirname, '..', 'output');
     if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
 
-    const result = await runFeeCollect(storedResidentMap, (progress) => {
+    const result = await runFeeCollect(storedResidentMap, storedAreaMap, (progress) => {
       mainWindow.webContents.send('progress-update', progress);
     });
     return result;
