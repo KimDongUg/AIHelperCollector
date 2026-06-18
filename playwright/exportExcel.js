@@ -14,7 +14,7 @@ function getYYYYMM() {
   return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}`;
 }
 
-async function exportExcel(data, outputDir) {
+async function exportExcel(data, outputDir, yearMonth) {
   if (!data || !data.length) throw new Error('내보낼 데이터가 없습니다.');
 
   // 동적 컬럼: 고정 컬럼 이후 모든 키 수집 (첫 데이터 행 기준)
@@ -64,7 +64,8 @@ async function exportExcel(data, outputDir) {
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, '관리비');
 
-  const filename = `관리비데이터_${getYYYYMM()}.xlsx`;
+  const ym = /^\d{6}$/.test(yearMonth || '') ? yearMonth : getYYYYMM();
+  const filename = `관리비데이터_${ym}.xlsx`;
   const filePath = path.join(outputDir, filename);
   XLSX.writeFile(wb, filePath);
   return filePath;

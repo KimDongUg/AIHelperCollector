@@ -118,6 +118,7 @@ async function runFeeCollect(residentMap, onProgress) {
 
   try {
     onProgress({ current: 0, total: 0, unit: '관리비조회 목록 읽는 중...' });
+    const feeYearMonth = await readFeeYearMonth(page);
     const feeResult = await readFeeUnitList(page);
     const feeUnits  = Array.isArray(feeResult) ? feeResult : [];
     const feeDiag   = (!Array.isArray(feeResult) && feeResult?.__diag) ? feeResult.__diag : '';
@@ -161,7 +162,7 @@ async function runFeeCollect(residentMap, onProgress) {
       return { ok: false, error: '수집된 데이터가 없습니다.' };
     }
 
-    const filePath = await exportExcel(allData, outputDir);
+    const filePath = await exportExcel(allData, outputDir, feeYearMonth);
     onProgress({ current: total, total, done: true });
     return {
       ok: true, filePath,
@@ -331,6 +332,36 @@ async function readResidentData(page) {
   } catch {}
 
   return map;
+}
+
+/* ═══════════════════════════════════════════════════════════
+ *  관리비조회: 부과년월 읽기
+ *
+ *  검색폼(#searchFrm) #imps_yymm 입력값 "2026.04" → "202604"
+ *  (없으면 hidden #first_yymm 으로 폴백)
+ * ═══════════════════════════════════════════════════════════ */
+async function readFeeYearMonth(page) {
+  const fn = () => {
+    const el = document.querySelector('#imps_yymm') || document.querySelector('#first_yymm');
+    const v = (el && (el.value || el.innerText) || '').trim();
+    const m = v.match(/(\d{4})\D?(\d{2})/);
+    return m ? `${m[1]}${m[2]}` : '';
+  };
+  const feeFrame = findFeeFrame(page);
+  if (feeFrame) {
+    try {
+      const ym = await feeFrame.evaluate(fn);
+      if (ym) return ym;
+    } catch {}
+  }
+  for (const f of page.frames()) {
+    if (f === page.mainFrame() || f === feeFrame) continue;
+    try {
+      const ym = await f.evaluate(fn);
+      if (ym) return ym;
+    } catch {}
+  }
+  return '';
 }
 
 /* ═══════════════════════════════════════════════════════════
