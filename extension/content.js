@@ -183,9 +183,31 @@
     btn.disabled = false;
   }
 
+  // XpERP는 탭 전환 시 이전 화면의 iframe을 파괴하지 않고 숨기기만 함 →
+  // 숨겨진 iframe 안의 고정(fixed) 버튼이 다른 탭 위에 계속 떠 있는 문제 방지.
+  function isFrameVisible() {
+    if (window === window.top) return false; // 최상위 프레임엔 실제 데이터가 없음(하위 iframe 소관)
+    const el = window.frameElement;
+    if (!el) return false;
+    if (el.offsetParent === null) return false; // display:none 계열로 숨겨짐
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  function removeButtons() {
+    document.getElementById('__aihelper_res_btn')?.remove();
+    document.getElementById('__aihelper_fee_btn')?.remove();
+  }
+
   async function checkAndInjectButtons() {
+    if (!isFrameVisible()) {
+      removeButtons();
+      return;
+    }
+
     if (!document.getElementById('__aihelper_res_btn')) {
       const resp = await requestFromPage('READ_RESIDENT_SHEET');
+      if (!isFrameVisible()) { removeButtons(); return; } // 응답 대기 중 탭이 바뀌었을 수 있음
       if (resp.result && Object.keys(resp.result).length > 0) {
         const b = makeButton('입주자 수집', 90, () => collectResidents(b));
         b.id = '__aihelper_res_btn';
@@ -193,6 +215,7 @@
     }
     if (!document.getElementById('__aihelper_fee_btn')) {
       const resp = await requestFromPage('READ_FEE_SHEET');
+      if (!isFrameVisible()) { removeButtons(); return; }
       if (resp.rows && resp.rows.length > 0) {
         const b = makeButton('관리비 수집', 30, () => collectFees(b));
         b.id = '__aihelper_fee_btn';
@@ -202,7 +225,7 @@
 
   function init() {
     checkAndInjectButtons();
-    setInterval(checkAndInjectButtons, 3000);
+    setInterval(checkAndInjectButtons, 2000);
   }
 
   if (document.readyState === 'complete' || document.readyState === 'interactive') init();
