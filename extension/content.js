@@ -1,24 +1,14 @@
 /**
- * ISOLATED world 스크립트 — chrome.storage 접근 및 fetch() 실행, 버튼 UI 담당.
+ * ISOLATED world 스크립트 — chrome.storage 접근, 버튼 UI, CSV 다운로드 담당.
  * main-world.js와는 window.postMessage로 통신.
  */
 (function () {
-  let capturedTemplate = null; // { url, params: URLSearchParams }
   let reqCounter = 0;
   const pending = {};
 
   window.addEventListener('message', (ev) => {
     const msg = ev.data;
     if (!msg || !msg.__aihelper) return;
-
-    if (msg.kind === 'template' && !capturedTemplate) {
-      try {
-        const params = new URLSearchParams(msg.body);
-        capturedTemplate = { url: msg.url.split('?')[0], params };
-        chrome.storage.local.set({ aihelper_template: msg.body });
-      } catch (e) {}
-    }
-
     if (msg.kind === 'response' && pending[msg.reqId]) {
       pending[msg.reqId](msg);
       delete pending[msg.reqId];
@@ -34,66 +24,6 @@
         if (pending[reqId]) { pending[reqId]({}); delete pending[reqId]; }
       }, timeoutMs);
     });
-  }
-
-  async function ensureTemplate() {
-    if (capturedTemplate) return capturedTemplate;
-    const saved = await chrome.storage.local.get('aihelper_template');
-    if (saved.aihelper_template) {
-      try {
-        capturedTemplate = {
-          url: 'https://ags4.xperp.co.kr/impo/impo_703m01_div_106.ajax',
-          params: new URLSearchParams(saved.aihelper_template),
-        };
-      } catch (e) {}
-    }
-    return capturedTemplate;
-  }
-
-  async function fetchUnitDetail(aptNo, aptRoom) {
-    const tpl = await ensureTemplate();
-    if (!tpl) return null;
-
-    const p = new URLSearchParams(tpl.params);
-    const combo = `${aptNo}${aptRoom}`;
-    p.set('APT_NO_RM_FR', combo);
-    p.set('APT_NO_RM_TO', combo);
-    p.set('STRAPTNO_FR', aptNo);
-    p.set('STRAPTRM_FR', aptRoom);
-
-    try {
-      const res = await fetch(`${tpl.url}?${p.toString()}`, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
-          'x-requested-with': 'XMLHttpRequest',
-        },
-        body: p.toString(),
-        credentials: 'include',
-      });
-      const text = await res.text();
-      debugLog(aptNo, aptRoom, res.status, text);
-      let json;
-      try { json = JSON.parse(text); } catch (e) {
-        console.warn('[AIHelper] JSON parse 실패', aptNo, aptRoom, text.slice(0, 200));
-        return null;
-      }
-      if (!Array.isArray(json.Data)) {
-        console.warn('[AIHelper] Data가 배열이 아님', aptNo, aptRoom, json);
-        return [];
-      }
-      return json.Data;
-    } catch (e) {
-      console.warn('[AIHelper] fetch 실패', aptNo, aptRoom, e.message);
-      return null;
-    }
-  }
-
-  let __debugCount = 0;
-  function debugLog(aptNo, aptRoom, status, text) {
-    if (__debugCount >= 5) return;
-    __debugCount++;
-    console.log(`[AIHelper] #${__debugCount} ${aptNo}${aptRoom} status=${status}`, text.slice(0, 500));
   }
 
   function makeButton(label, bottom, onClick) {
@@ -139,6 +69,7 @@
 
   async function collectFees(btn) {
     btn.disabled = true;
+    btn.textContent = '읽는 중...';
     const resp = await requestFromPage('READ_FEE_SHEET');
     const rows = resp.rows || [];
     if (!rows.length) {
@@ -148,25 +79,12 @@
       return;
     }
 
-    const tpl = await ensureTemplate();
-    if (!tpl) {
-      btn.textContent = '세대 하나를 먼저 클릭해주세요';
-      btn.disabled = false;
-      setTimeout(() => { btn.textContent = '관리비 수집'; }, 3000);
-      return;
-    }
-
     const stored = await chrome.storage.local.get('aihelper_residents');
     const residents = stored.aihelper_residents || {};
 
     const out = [];
-    const itemKeys = new Set();
-    let done = 0;
+    const amtKeys = new Set();
     for (const r of rows) {
-      done++;
-      btn.textContent = `수집 중 ${done}/${rows.length}`;
-      const detail = await fetchUnitDetail(r.aptNo, r.aptRoom);
-
       const dong = parseInt(r.vApt || r.aptNo, 10);
       const ho = parseInt(r.vRoom, 10) || '';
       const resident = residents[`${dong}-${ho}`] || {};
@@ -180,18 +98,15 @@
         입주일: r.occuDate || '',
         당월부과액: r.imps19 || '',
       };
-      if (Array.isArray(detail)) {
-        for (const d of detail) {
-          const key = `항목_${d.IMPS_ITEM_CD}`;
-          row[key] = d.IMPS_AMT;
-          itemKeys.add(key);
-        }
+      for (const [k, v] of Object.entries(r.amtFields || {})) {
+        row[k] = v;
+        amtKeys.add(k);
       }
       out.push(row);
     }
 
     const headers = ['동', '호', '이름', '소유주', '휴대폰', '분양면적', '전용면적', '입주일', '당월부과액',
-      ...Array.from(itemKeys).sort()];
+      ...Array.from(amtKeys).sort()];
     const csv = toCSV(out, headers);
     const now = new Date();
     const ym = resp.yymm || `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}`;

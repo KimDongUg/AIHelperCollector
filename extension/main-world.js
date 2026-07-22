@@ -1,7 +1,12 @@
 /**
  * MAIN world 스크립트 — 페이지의 실제 JS 컨텍스트에서 실행됨.
- * 1) XHR을 가로채서 관리비 상세조회(div_106/div_107.ajax) 요청의 viewInfo 템플릿을 확보
- * 2) window.IBSheet 데이터를 읽어 content.js(ISOLATED world)에 postMessage로 전달
+ * window.IBSheet 데이터를 읽어 content.js(ISOLATED world)에 postMessage로 전달.
+ *
+ * 관리비 항목별 금액은 클릭 시 발생하는 AJAX(impo_703m01_div_106.ajax)를 fetch()로
+ * 재현하는 방식을 시도했으나, viewInfo 세션/정확한 div 번호 등 불확실한 변수가 많아
+ * 반복적으로 실패함. IBSheet.Rows에 이미 로드되어 있는 SUM_IMPS_AMT1~22 필드는
+ * 클릭·네트워크 호출 없이도 844세대 전부(한 번도 클릭 안 한 세대 포함)에서
+ * 안정적으로 확인됐으므로 이 필드들을 그대로 사용한다.
  *
  * IBSheet 필드 값이 문자열이 아니라 DOM 엘리먼트로 오는 경우가 있어 gv()로 통일 처리.
  */
@@ -12,24 +17,6 @@
     try { return String(v.innerText ?? v.textContent ?? '').trim(); } catch { return ''; }
   }
 
-  // ── 1) viewInfo 템플릿 캡처 ──────────────────────────────────
-  const origOpen = XMLHttpRequest.prototype.open;
-  const origSend = XMLHttpRequest.prototype.send;
-  XMLHttpRequest.prototype.open = function (method, url) {
-    this.__aihelperUrl = url;
-    return origOpen.apply(this, arguments);
-  };
-  XMLHttpRequest.prototype.send = function (body) {
-    try {
-      const url = this.__aihelperUrl || '';
-      if (typeof body === 'string' && body.includes('viewInfo=') && /div_10[67]\.ajax/.test(url)) {
-        window.postMessage({ __aihelper: true, kind: 'template', url, body }, '*');
-      }
-    } catch (e) {}
-    return origSend.apply(this, arguments);
-  };
-
-  // ── 2) IBSheet 데이터 읽기 요청 처리 ─────────────────────────
   window.addEventListener('message', (ev) => {
     const msg = ev.data;
     if (!msg || !msg.__aihelper || msg.kind !== 'request') return;
@@ -46,6 +33,12 @@
           if (!r) continue;
           const aptNo = gv(r.APT_NO);
           if (!aptNo || aptNo === '0000') continue;
+
+          const amtFields = {};
+          for (const f in r) {
+            if (/^SUM_IMPS_AMT\d+$/.test(f)) amtFields[f] = gv(r[f]);
+          }
+
           rows.push({
             aptNo,
             aptRoom: gv(r.APT_ROOM),
@@ -57,6 +50,7 @@
             sellPyong: gv(r.SELL_PYONG),
             occuDate: gv(r.OCCU_DATE),
             imps19: gv(r.SUM_IMPS_AMT19),
+            amtFields,
           });
         }
       }
