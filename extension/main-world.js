@@ -76,8 +76,9 @@
         if (!sheet || !sheet.Rows) continue;
         const arKeys = Object.keys(sheet.Rows).filter(k => /^AR\d+$/.test(k));
         if (!arKeys.length) continue;
-        const first = sheet.Rows[arKeys[0]];
-        if (!first || !('PRT_APT_NO' in first)) continue;
+        // AR1은 "전체" 집계 행이라 PRT_APT_NO가 없을 수 있음 → 앞 몇 개 행을 확인
+        const hasField = arKeys.slice(0, 5).some(k => sheet.Rows[k] && 'PRT_APT_NO' in sheet.Rows[k]);
+        if (!hasField) continue;
         for (const k of arKeys) {
           const r = sheet.Rows[k];
           if (!r) continue;

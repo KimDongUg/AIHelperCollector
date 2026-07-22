@@ -201,15 +201,24 @@
     btn.disabled = false;
   }
 
-  // XpERP는 탭 전환 시 이전 화면의 iframe을 파괴하지 않고 숨기기만 함 →
-  // 숨겨진 iframe 안의 고정(fixed) 버튼이 다른 탭 위에 계속 떠 있는 문제 방지.
+  // XpERP는 탭 전환 시 이전 화면의 iframe을 파괴/숨김(display:none) 하지 않고
+  // 겹쳐서(z-index/absolute) 쌓아두는 방식이라 offsetParent/크기만으로는 구분이 안 됨.
+  // → iframe 중앙 좌표에서 실제로 "맨 위에 그려지는 요소"가 이 iframe 자신인지 확인.
   function isFrameVisible() {
     if (window === window.top) return false; // 최상위 프레임엔 실제 데이터가 없음(하위 iframe 소관)
     const el = window.frameElement;
     if (!el) return false;
     if (el.offsetParent === null) return false; // display:none 계열로 숨겨짐
     const rect = el.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
+    if (rect.width <= 0 || rect.height <= 0) return false;
+    try {
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+      const topEl = window.parent.document.elementFromPoint(cx, cy);
+      return topEl === el || el.contains(topEl);
+    } catch (e) {
+      return true; // 부모 문서 접근 불가 시 기존 판정으로 폴백
+    }
   }
 
   function removeButtons() {
