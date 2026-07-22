@@ -41,7 +41,10 @@ ipcMain.handle('open-erp-browser', async (_e, port, erpUrl) => {
   const cdpPort = port || 9222;
   const url = erpUrl || process.env.ERP_URL || '';
   const urlArg = url ? ` "${url}"` : '';
-  const flags = `--remote-debugging-port=${cdpPort}`;
+  // 기본 프로필로는 최신 Edge/Chrome이 remote-debugging-port를 무시하므로
+  // 전용 프로필 경로를 지정해 CDP를 강제로 활성화한다 (로그인 세션은 이 폴더에 유지됨).
+  const profileDir = path.join(app.getPath('userData'), 'erp-profile');
+  const flags = `--remote-debugging-port=${cdpPort} --user-data-dir="${profileDir}"`;
 
   // Edge 백그라운드 프로세스까지 완전 종료 후 CDP 모드로 재시작
   const confirmed = dialog.showMessageBoxSync(mainWindow, {
