@@ -71,11 +71,29 @@
         body: p.toString(),
         credentials: 'include',
       });
-      const json = await res.json();
-      return Array.isArray(json.Data) ? json.Data : [];
+      const text = await res.text();
+      debugLog(aptNo, aptRoom, res.status, text);
+      let json;
+      try { json = JSON.parse(text); } catch (e) {
+        console.warn('[AIHelper] JSON parse 실패', aptNo, aptRoom, text.slice(0, 200));
+        return null;
+      }
+      if (!Array.isArray(json.Data)) {
+        console.warn('[AIHelper] Data가 배열이 아님', aptNo, aptRoom, json);
+        return [];
+      }
+      return json.Data;
     } catch (e) {
+      console.warn('[AIHelper] fetch 실패', aptNo, aptRoom, e.message);
       return null;
     }
+  }
+
+  let __debugCount = 0;
+  function debugLog(aptNo, aptRoom, status, text) {
+    if (__debugCount >= 5) return;
+    __debugCount++;
+    console.log(`[AIHelper] #${__debugCount} ${aptNo}${aptRoom} status=${status}`, text.slice(0, 500));
   }
 
   function makeButton(label, bottom, onClick) {

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AI Helper 관리비 수집기",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "XpERP 관리비조회/입주자현황 화면에서 데이터를 자동 수집합니다.",
   "content_scripts": [
     {
