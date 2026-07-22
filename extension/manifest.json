@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "AI Helper 관리비 수집기",
+  "version": "1.0.0",
+  "description": "XpERP 관리비조회/입주자현황 화면에서 데이터를 자동 수집합니다.",
+  "content_scripts": [
+    {
+      "matches": ["https://ags4.xperp.co.kr/*"],
+      "js": ["main-world.js"],
+      "world": "MAIN",
+      "all_frames": true,
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://ags4.xperp.co.kr/*"],
+      "js": ["content.js"],
+      "all_frames": true,
+      "run_at": "document_idle"
+    }
+  ],
+  "permissions": ["storage"]
+}
