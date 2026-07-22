@@ -1,14 +1,30 @@
 /**
- * ISOLATED world 스크립트 — chrome.storage 접근, 버튼 UI, CSV 다운로드 담당.
+ * ISOLATED world 스크립트 — chrome.storage 접근, fetch() 실행, 버튼 UI, CSV 다운로드 담당.
  * main-world.js와는 window.postMessage로 통신.
  */
 (function () {
   let reqCounter = 0;
   const pending = {};
+  let capturedTemplate = null; // URLSearchParams (div_106.ajax 원본 body에서 추출)
+
+  // 확인된 항목 코드 → 한글 라벨 (미확인 코드는 코드 번호 그대로 사용)
+  const ITEM_LABELS = {
+    '06': '일반관리비',
+  };
+
+  const FEE_DETAIL_URL = 'https://ags4.xperp.co.kr/impo/impo_703m01_div_106.ajax';
 
   window.addEventListener('message', (ev) => {
     const msg = ev.data;
     if (!msg || !msg.__aihelper) return;
+
+    if (msg.kind === 'template' && !capturedTemplate) {
+      try {
+        capturedTemplate = new URLSearchParams(msg.body);
+        chrome.storage.local.set({ aihelper_template: msg.body });
+      } catch (e) {}
+    }
+
     if (msg.kind === 'response' && pending[msg.reqId]) {
       pending[msg.reqId](msg);
       delete pending[msg.reqId];
@@ -24,6 +40,45 @@
         if (pending[reqId]) { pending[reqId]({}); delete pending[reqId]; }
       }, timeoutMs);
     });
+  }
+
+  async function ensureTemplate() {
+    if (capturedTemplate) return capturedTemplate;
+    const saved = await chrome.storage.local.get('aihelper_template');
+    if (saved.aihelper_template) {
+      try { capturedTemplate = new URLSearchParams(saved.aihelper_template); } catch (e) {}
+    }
+    return capturedTemplate;
+  }
+
+  // 항상 impo_703m01_div_106.ajax(항목별 부과내역)로 고정 호출.
+  // 예전엔 div_106/div_107을 정규식으로 같이 잡아서 엉뚱한 템플릿을 캡처하는 버그가 있었음.
+  async function fetchUnitDetail(aptNo, aptRoom) {
+    const tpl = await ensureTemplate();
+    if (!tpl) return null;
+
+    const p = new URLSearchParams(tpl);
+    const combo = `${aptNo}${aptRoom}`;
+    p.set('APT_NO_RM_FR', combo);
+    p.set('APT_NO_RM_TO', combo);
+    p.set('STRAPTNO_FR', aptNo);
+    p.set('STRAPTRM_FR', aptRoom);
+
+    try {
+      const res = await fetch(`${FEE_DETAIL_URL}?${p.toString()}`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+          'x-requested-with': 'XMLHttpRequest',
+        },
+        body: p.toString(),
+        credentials: 'include',
+      });
+      const json = await res.json();
+      return Array.isArray(json.Data) ? json.Data : [];
+    } catch (e) {
+      return null;
+    }
   }
 
   function makeButton(label, bottom, onClick) {
@@ -79,12 +134,24 @@
       return;
     }
 
+    const tpl = await ensureTemplate();
+    if (!tpl) {
+      btn.textContent = '세대 하나를 먼저 클릭해주세요';
+      btn.disabled = false;
+      setTimeout(() => { btn.textContent = '관리비 수집'; }, 3000);
+      return;
+    }
+
     const stored = await chrome.storage.local.get('aihelper_residents');
     const residents = stored.aihelper_residents || {};
 
     const out = [];
-    const amtKeys = new Set();
+    const itemKeys = new Set();
+    let done = 0;
     for (const r of rows) {
+      done++;
+      btn.textContent = `수집 중 ${done}/${rows.length}`;
+
       const dong = parseInt(r.vApt || r.aptNo, 10);
       const ho = parseInt(r.vRoom, 10) || '';
       const resident = residents[`${dong}-${ho}`] || {};
@@ -98,15 +165,21 @@
         입주일: r.occuDate || '',
         당월부과액: r.imps19 || '',
       };
-      for (const [k, v] of Object.entries(r.amtFields || {})) {
-        row[k] = v;
-        amtKeys.add(k);
+
+      const detail = await fetchUnitDetail(r.aptNo, r.aptRoom);
+      if (Array.isArray(detail)) {
+        for (const d of detail) {
+          const label = ITEM_LABELS[d.IMPS_ITEM_CD] || d.IMPS_ITEM_CD;
+          const key = `항목_${label}`;
+          row[key] = d.IMPS_AMT;
+          itemKeys.add(key);
+        }
       }
       out.push(row);
     }
 
     const headers = ['동', '호', '이름', '소유주', '휴대폰', '분양면적', '전용면적', '입주일', '당월부과액',
-      ...Array.from(amtKeys).sort()];
+      ...Array.from(itemKeys).sort()];
     const csv = toCSV(out, headers);
     const now = new Date();
     const ym = resp.yymm || `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}`;

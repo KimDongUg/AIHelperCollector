@@ -1,12 +1,10 @@
 /**
  * MAIN world 스크립트 — 페이지의 실제 JS 컨텍스트에서 실행됨.
- * window.IBSheet 데이터를 읽어 content.js(ISOLATED world)에 postMessage로 전달.
- *
- * 관리비 항목별 금액은 클릭 시 발생하는 AJAX(impo_703m01_div_106.ajax)를 fetch()로
- * 재현하는 방식을 시도했으나, viewInfo 세션/정확한 div 번호 등 불확실한 변수가 많아
- * 반복적으로 실패함. IBSheet.Rows에 이미 로드되어 있는 SUM_IMPS_AMT1~22 필드는
- * 클릭·네트워크 호출 없이도 844세대 전부(한 번도 클릭 안 한 세대 포함)에서
- * 안정적으로 확인됐으므로 이 필드들을 그대로 사용한다.
+ * 1) XHR을 가로채서 관리비 항목별 상세조회(impo_703m01_div_106.ajax 전용)의
+ *    viewInfo 등 파라미터 템플릿을 확보 — div_107 등 다른 div와 정규식이 겹치면
+ *    엉뚱한 템플릿을 캡처해 항목 코드가 undefined로 나오는 문제가 있었어서
+ *    div_106만 정확히 매칭하도록 제한함.
+ * 2) window.IBSheet 데이터를 읽어 content.js(ISOLATED world)에 postMessage로 전달.
  *
  * IBSheet 필드 값이 문자열이 아니라 DOM 엘리먼트로 오는 경우가 있어 gv()로 통일 처리.
  */
@@ -16,6 +14,23 @@
     if (typeof v === 'string' || typeof v === 'number') return String(v).trim();
     try { return String(v.innerText ?? v.textContent ?? '').trim(); } catch { return ''; }
   }
+
+  // ── 1) viewInfo 템플릿 캡처 (div_106 전용) ──────────────────
+  const origOpen = XMLHttpRequest.prototype.open;
+  const origSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function (method, url) {
+    this.__aihelperUrl = url;
+    return origOpen.apply(this, arguments);
+  };
+  XMLHttpRequest.prototype.send = function (body) {
+    try {
+      const url = this.__aihelperUrl || '';
+      if (typeof body === 'string' && body.includes('viewInfo=') && /impo_703m01_div_106\.ajax/.test(url)) {
+        window.postMessage({ __aihelper: true, kind: 'template', body }, '*');
+      }
+    } catch (e) {}
+    return origSend.apply(this, arguments);
+  };
 
   window.addEventListener('message', (ev) => {
     const msg = ev.data;
