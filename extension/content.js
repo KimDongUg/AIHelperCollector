@@ -6,6 +6,8 @@
   let reqCounter = 0;
   const pending = {};
   let capturedTemplate = null; // URLSearchParams (div_106.ajax 원본 body에서 추출)
+  const DEBUG_CAP_LIMIT = 80;
+  let debugCaptures = []; // [{divNo, url, requestBody, responseText, ts}] — 검침/청구서요약 div 조사용
 
   // 확인된 항목 코드 → 한글 라벨 (미확인 코드는 코드 번호 그대로 사용)
   // 2026-07-24: 지난달(라벨 있음) vs 이번달(코드만 있음) 844세대 금액 상관분석으로 추정.
@@ -44,6 +46,15 @@
     if (msg.kind === 'response' && pending[msg.reqId]) {
       pending[msg.reqId](msg);
       delete pending[msg.reqId];
+    }
+
+    if (msg.kind === 'debug_capture') {
+      debugCaptures.push({
+        divNo: msg.divNo, url: msg.url, requestBody: msg.requestBody,
+        responseText: msg.responseText, ts: Date.now(),
+      });
+      if (debugCaptures.length > DEBUG_CAP_LIMIT) debugCaptures.shift();
+      chrome.storage.local.set({ aihelper_debug_captures: debugCaptures });
     }
   });
 
@@ -125,6 +136,30 @@
     a.href = url; a.download = filename;
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
+  }
+
+  // 세대 클릭 시 동시에 호출되는 div_1/2/3/55/106/107 등의 원본 응답을
+  // 지금까지 캡처된 만큼 JSON으로 다운로드 (검침값·청구서 요약값이 어느 div에 있는지 조사용).
+  // 관리비조회 화면에서 세대 여러 개를 평소처럼 클릭해본 뒤 이 버튼을 누르면 됨.
+  function downloadDebugCaptures(btn) {
+    if (!debugCaptures.length) {
+      btn.textContent = '캡처된 게 없음 — 세대를 먼저 클릭하세요';
+      setTimeout(() => { btn.textContent = '디버그 원본 다운로드'; }, 3000);
+      return;
+    }
+    const byDiv = {};
+    for (const c of debugCaptures) (byDiv[c.divNo] = byDiv[c.divNo] || []).push(c);
+    const text = JSON.stringify({ capturedAt: new Date().toISOString(), byDiv }, null, 2);
+    const blob = new Blob([text], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const now = new Date();
+    const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}_${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`;
+    a.href = url; a.download = `aihelper_debug_${stamp}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+    btn.textContent = `다운로드 완료 (${debugCaptures.length}건)`;
+    setTimeout(() => { btn.textContent = '디버그 원본 다운로드'; }, 3000);
   }
 
   async function collectResidents(btn) {
@@ -228,6 +263,7 @@
   function removeButtons() {
     document.getElementById('__aihelper_res_btn')?.remove();
     document.getElementById('__aihelper_fee_btn')?.remove();
+    document.getElementById('__aihelper_debug_btn')?.remove();
   }
 
   async function checkAndInjectButtons() {
@@ -251,6 +287,11 @@
         const b = makeButton('관리비 수집', 30, () => collectFees(b));
         b.id = '__aihelper_fee_btn';
       }
+    }
+    if (!document.getElementById('__aihelper_debug_btn')) {
+      const b = makeButton('디버그 원본 다운로드', 150, () => downloadDebugCaptures(b));
+      b.id = '__aihelper_debug_btn';
+      b.style.background = '#555';
     }
   }
 

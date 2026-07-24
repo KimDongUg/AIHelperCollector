@@ -18,6 +18,7 @@
   // ── 1) viewInfo 템플릿 캡처 (div_106 전용) ──────────────────
   const origOpen = XMLHttpRequest.prototype.open;
   const origSend = XMLHttpRequest.prototype.send;
+  const DIV_RE = /impo_703m01_div_(\d+)\.ajax/;
   XMLHttpRequest.prototype.open = function (method, url) {
     this.__aihelperUrl = url;
     return origOpen.apply(this, arguments);
@@ -27,6 +28,23 @@
       const url = this.__aihelperUrl || '';
       if (typeof body === 'string' && body.includes('viewInfo=') && /impo_703m01_div_106\.ajax/.test(url)) {
         window.postMessage({ __aihelper: true, kind: 'template', body }, '*');
+      }
+
+      // 디버그: 세대 클릭 시 동시에 호출되는 div_1/2/3/55/106/107 등 모든 div의
+      // 원본 응답을 수동으로 캡처(검침값·청구서 요약값이 어느 div에 있는지 조사용).
+      // 정상 수집 흐름(위 템플릿 캡처)과는 별개로 항상 동작.
+      const divMatch = url.match(DIV_RE);
+      if (divMatch) {
+        const divNo = divMatch[1];
+        const reqBody = typeof body === 'string' ? body : '';
+        this.addEventListener('load', function () {
+          try {
+            window.postMessage({
+              __aihelper: true, kind: 'debug_capture',
+              divNo, url, requestBody: reqBody, responseText: this.responseText,
+            }, '*');
+          } catch (e) {}
+        });
       }
     } catch (e) {}
     return origSend.apply(this, arguments);
