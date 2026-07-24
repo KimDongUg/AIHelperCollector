@@ -242,15 +242,38 @@
       out.push(row);
     }
 
-    const headers = ['동', '호', '이름', '소유주', '휴대폰', '분양면적', '전용면적', '입주일', '당월부과액',
-      ...Array.from(itemKeys).sort()];
-    const csv = toCSV(out, headers);
     const now = new Date();
     const ym = resp.yymm || `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}`;
-    download(`관리비데이터_${ym}.csv`, csv);
 
-    btn.textContent = `완료 (${out.length}건) — 다시 수집`;
-    btn.disabled = false;
+    const headers = ['동', '호', '이름', '소유주', '휴대폰', '분양면적', '전용면적', '입주일', '당월부과액',
+      ...Array.from(itemKeys).sort()];
+
+    function fallbackDownload(reason) {
+      const csv = toCSV(out, headers);
+      download(`관리비데이터_${ym}.csv`, csv);
+      btn.textContent = reason;
+      btn.disabled = false;
+    }
+
+    const stored2 = await chrome.storage.local.get('aihelper_api_key');
+    const apiKey = stored2.aihelper_api_key;
+    if (!apiKey) {
+      fallbackDownload(`API 키 미설정 — CSV로 저장됨 (${out.length}건). 확장프로그램 아이콘에서 설정해주세요.`);
+      return;
+    }
+
+    btn.textContent = `업로드 중... (${out.length}건)`;
+    const resp2 = await chrome.runtime.sendMessage({
+      __aihelper_bg: true, action: 'UPLOAD_FEE', apiKey, yearMonth: ym, rows: out,
+    });
+
+    if (resp2 && resp2.ok) {
+      btn.textContent = `업로드 완료 (${resp2.data.rows}건, ${ym.slice(0, 4)}년 ${parseInt(ym.slice(4, 6))}월분) — 다시 수집`;
+      btn.disabled = false;
+    } else {
+      const detail = (resp2 && resp2.data && resp2.data.detail) || '알 수 없는 오류';
+      fallbackDownload(`업로드 실패(${detail}) — CSV로 대신 저장됨 (${out.length}건)`);
+    }
   }
 
   // XpERP는 탭 전환 시 이전 화면의 iframe을 파괴/숨김(display:none) 하지 않고

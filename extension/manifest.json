@@ -1,8 +1,14 @@
 {
   "manifest_version": 3,
   "name": "AI Helper 관리비 수집기",
-  "version": "1.5.0",
-  "description": "XpERP 관리비조회/입주자현황 화면에서 데이터를 자동 수집합니다.",
+  "version": "1.6.0",
+  "description": "XpERP 관리비조회/입주자현황 화면에서 데이터를 자동 수집해 AccHelper 서버로 업로드합니다.",
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
   "content_scripts": [
     {
       "matches": ["https://ags4.xperp.co.kr/*"],
@@ -18,5 +24,6 @@
       "run_at": "document_idle"
     }
   ],
+  "host_permissions": ["https://acchelper.kr/*"],
   "permissions": ["storage"]
 }

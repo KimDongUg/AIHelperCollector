@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>AI Helper 관리비 수집기 설정</title>
+<style>
+  body { width: 300px; font-family: -apple-system, "Malgun Gothic", sans-serif; padding: 16px; margin: 0; }
+  h1 { font-size: 14px; margin: 0 0 12px; }
+  label { display: block; font-size: 12px; color: #555; margin-bottom: 4px; }
+  input[type=text] { width: 100%; box-sizing: border-box; padding: 8px; font-size: 13px; border: 1px solid #ccc; border-radius: 4px; margin-bottom: 8px; }
+  button { width: 100%; padding: 9px; font-size: 13px; font-weight: bold; color: #fff; background: #1565C0; border: none; border-radius: 4px; cursor: pointer; }
+  button:disabled { background: #999; cursor: default; }
+  #status { margin-top: 10px; font-size: 12px; line-height: 1.5; white-space: pre-wrap; }
+  .ok { color: #16a34a; }
+  .err { color: #dc2626; }
+  .hint { font-size: 11px; color: #888; margin-top: 10px; line-height: 1.5; }
+</style>
+</head>
+<body>
+  <h1>AI Helper 관리비 수집기 설정</h1>
+  <label for="apiKey">우리 아파트 API 키</label>
+  <input type="text" id="apiKey" placeholder="acchelper.kr 관리자 대시보드에서 복사">
+  <button id="saveBtn">저장 & 확인</button>
+  <div id="status"></div>
+  <div class="hint">acchelper.kr 관리자 대시보드 → "ERP 수집기 API 키"에서 복사해 붙여넣으세요. 저장 후 XpERP 관리비조회 화면에서 세대를 클릭하면 자동으로 이 아파트 계정으로 업로드됩니다.</div>
+  <script src="popup.js"></script>
+</body>
+</html>
