@@ -5,43 +5,49 @@
 (function () {
   let reqCounter = 0;
   const pending = {};
-  let capturedTemplate = null; // URLSearchParams (div_106.ajax 원본 body에서 추출)
   const DEBUG_CAP_LIMIT = 80;
-  let debugCaptures = []; // [{divNo, url, requestBody, responseText, ts}] — 검침/청구서요약 div 조사용
+  let debugCaptures = []; // [{divNo, url, requestBody, responseText, ts}] — 디버그 다운로드용
+  let latestDiv107Text = null; // 세대 클릭 시 XpERP가 통째로 내려주는 전체 세대 벌크 응답(원본)
 
-  // 확인된 항목 코드 → 한글 라벨 (미확인 코드는 코드 번호 그대로 사용)
-  // 2026-07-24: 지난달(라벨 있음) vs 이번달(코드만 있음) 844세대 금액 상관분석으로 추정.
-  // ratio~1.000인 고정비 항목은 확정, 사용량성 항목(전기/전력기금/급탕)은 유일 후보로 채택.
+  // 항목 코드 → 한글 라벨. div_3.ajax(XpERP 자체 항목코드 마스터 데이터, 2026-07-24
+  // 디버그 캡처로 확인) 기준 06~36 전체 확정값 — 더 이상 추정이 아님.
   const ITEM_LABELS = {
-    '06': '일반관리비',
-    '08': '소독비',
-    '09': '승강기유지비',
-    '11': '장기수선충당금',
-    '12': '법정의무점검비',
-    '14': '건물보험료',
-    '22': 'TV수신료',
-    '24': '세대수도료',
-    '26': '하수도료',
-    '28': '기본냉난방비',
-    '31': '물이용부담금',
-    '35': '청소용품비',
-    '19': '세대전기료',
-    '23': '세대전력기금',
-    '30': '세대급탕비',
+    '06': '일반관리비', '07': '청소비', '08': '소독비', '09': '승강기유지비',
+    '10': '수선유지비', '11': '장기수선충당금', '12': '법정의무점검비', '13': '제경비',
+    '14': '건물보험료', '15': '제경비(비과세)', '16': '소상공인지원금', '17': '공동전력기금',
+    '18': '냉난방동력전기', '19': '세대전기료', '20': '공동전기료', '21': '승강기전기',
+    '22': 'TV수신료', '23': '세대전력기금', '24': '세대수도료', '25': '공동수도료',
+    '26': '하수도료', '27': '세대난방비', '28': '기본냉난방비', '29': '공동냉난방비',
+    '30': '세대급탕비', '31': '물이용부담금', '32': '이주정산/과입금', '33': '세대냉방비',
+    '34': '바우처할인', '35': '청소용품비', '36': '에너지캐쉬백',
   };
 
-  const FEE_DETAIL_URL = 'https://ags4.xperp.co.kr/impo/impo_703m01_div_106.ajax';
+  // div_107 응답의 METERn/USE_QTYn 인덱스 ↔ 검침 항목, 단가 계산에 쓸 항목 코드
+  // (div_2.ajax 검침 마스터의 CD_CODE 01~05 순서와 일치, 2026-07-24 실측 검증:
+  //  METER1 단가 ≈184원/kWh, METER3 단가 ≈665~670원/톤로 3세대 이상 교차확인)
+  const METER_MAP = [
+    { idx: 1, key: '전기', code: '19' },
+    { idx: 2, key: '온수', code: '30' },
+    { idx: 3, key: '수도', code: '24' },
+    { idx: 4, key: '난방', code: '27' },
+    { idx: 5, key: '냉방', code: '33' },
+  ];
+
+  // div_107 청구서 요약 필드 ↔ 백엔드 _SUMMARY_KEYS 라벨 (2026-07-24 실측 검증:
+  // TAX_SUM+TAX_VALUE+TAX_FREE_SUM ≈ CURR_SUM, TAX_VALUE/TAX_SUM≈10%로 VAT 확인)
+  const SUMMARY_FIELD_MAP = {
+    '관리비소계': 'MNG_EXP_SUM',
+    '징수대행소계': 'IM_PROXY_SUM',
+    '합계(납기내)': 'DLY_APP_SUM',
+    '연체료(납기후)': 'DLY_AFT_SUM',
+    '공급가액': 'TAX_SUM',
+    '부가가치세': 'TAX_VALUE',
+    '비과세합계': 'TAX_FREE_SUM',
+  };
 
   window.addEventListener('message', (ev) => {
     const msg = ev.data;
     if (!msg || !msg.__aihelper) return;
-
-    if (msg.kind === 'template' && !capturedTemplate) {
-      try {
-        capturedTemplate = new URLSearchParams(msg.body);
-        chrome.storage.local.set({ aihelper_template: msg.body });
-      } catch (e) {}
-    }
 
     if (msg.kind === 'response' && pending[msg.reqId]) {
       pending[msg.reqId](msg);
@@ -55,6 +61,8 @@
       });
       if (debugCaptures.length > DEBUG_CAP_LIMIT) debugCaptures.shift();
       chrome.storage.local.set({ aihelper_debug_captures: debugCaptures });
+
+      if (msg.divNo === '107') latestDiv107Text = msg.responseText;
     }
   });
 
@@ -67,45 +75,6 @@
         if (pending[reqId]) { pending[reqId]({}); delete pending[reqId]; }
       }, timeoutMs);
     });
-  }
-
-  async function ensureTemplate() {
-    if (capturedTemplate) return capturedTemplate;
-    const saved = await chrome.storage.local.get('aihelper_template');
-    if (saved.aihelper_template) {
-      try { capturedTemplate = new URLSearchParams(saved.aihelper_template); } catch (e) {}
-    }
-    return capturedTemplate;
-  }
-
-  // 항상 impo_703m01_div_106.ajax(항목별 부과내역)로 고정 호출.
-  // 예전엔 div_106/div_107을 정규식으로 같이 잡아서 엉뚱한 템플릿을 캡처하는 버그가 있었음.
-  async function fetchUnitDetail(aptNo, aptRoom) {
-    const tpl = await ensureTemplate();
-    if (!tpl) return null;
-
-    const p = new URLSearchParams(tpl);
-    const combo = `${aptNo}${aptRoom}`;
-    p.set('APT_NO_RM_FR', combo);
-    p.set('APT_NO_RM_TO', combo);
-    p.set('STRAPTNO_FR', aptNo);
-    p.set('STRAPTRM_FR', aptRoom);
-
-    try {
-      const res = await fetch(`${FEE_DETAIL_URL}?${p.toString()}`, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
-          'x-requested-with': 'XMLHttpRequest',
-        },
-        body: p.toString(),
-        credentials: 'include',
-      });
-      const json = await res.json();
-      return Array.isArray(json.Data) ? json.Data : [];
-    } catch (e) {
-      return null;
-    }
   }
 
   function makeButton(label, bottom, onClick) {
@@ -185,9 +154,23 @@
       return;
     }
 
-    const tpl = await ensureTemplate();
-    if (!tpl) {
+    // div_107(전체 세대 벌크 응답)은 세대를 1개만 클릭해도 XpERP가 자동으로
+    // 같이 호출해줌 — 예전처럼 세대마다 반복 조회할 필요 없음.
+    if (!latestDiv107Text) {
       btn.textContent = '세대 하나를 먼저 클릭해주세요';
+      btn.disabled = false;
+      setTimeout(() => { btn.textContent = '관리비 수집'; }, 3000);
+      return;
+    }
+
+    let bulkData;
+    try {
+      bulkData = JSON.parse(latestDiv107Text).Data;
+    } catch (e) {
+      bulkData = null;
+    }
+    if (!Array.isArray(bulkData) || !bulkData.length) {
+      btn.textContent = '전체 데이터 파싱 실패 — 세대를 다시 클릭해주세요';
       btn.disabled = false;
       setTimeout(() => { btn.textContent = '관리비 수집'; }, 3000);
       return;
@@ -196,12 +179,17 @@
     const stored = await chrome.storage.local.get('aihelper_residents');
     const residents = stored.aihelper_residents || {};
 
+    // IBSheet 동호내역(rows)을 APT_NO+APT_ROOM 내부코드 기준으로 lookup화
+    // (div_107 응답도 같은 내부코드로 세대를 식별하므로 이 키로 매칭)
+    const sheetByKey = {};
+    for (const r of rows) sheetByKey[`${r.aptNo}${r.aptRoom}`] = r;
+
     const out = [];
     const itemKeys = new Set();
-    let done = 0;
-    for (const r of rows) {
-      done++;
-      btn.textContent = `수집 중 ${done}/${rows.length}`;
+    for (const d of bulkData) {
+      if (!d.APT_NO || d.APT_NO === '0000' || !d.APT_ROOM || d.APT_ROOM === '0000') continue; // 전체 집계행 제외
+      const r = sheetByKey[`${d.APT_NO}${d.APT_ROOM}`];
+      if (!r) continue;
 
       const dong = parseInt(r.vApt || r.aptNo, 10);
       const ho = parseInt(r.vRoom, 10) || '';
@@ -217,15 +205,40 @@
         당월부과액: r.imps19 || '',
       };
 
-      const detail = await fetchUnitDetail(r.aptNo, r.aptRoom);
-      if (Array.isArray(detail)) {
-        for (const d of detail) {
-          const label = ITEM_LABELS[d.IMPS_ITEM_CD] || d.IMPS_ITEM_CD;
-          const key = `항목_${label}`;
-          row[key] = d.IMPS_AMT;
-          itemKeys.add(key);
-        }
+      // 항목별 부과내역 (ITEM_AMT1~40 와이드포맷 → 라벨 있는 06~36만 사용)
+      for (const code in ITEM_LABELS) {
+        const amt = d[`ITEM_AMT${parseInt(code, 10)}`];
+        if (amt === undefined || amt === null || amt === '' || Number(amt) === 0) continue;
+        const key = `항목_${ITEM_LABELS[code]}`;
+        row[key] = amt;
+        itemKeys.add(key);
       }
+
+      // 청구서 요약값
+      for (const label in SUMMARY_FIELD_MAP) {
+        const v = d[SUMMARY_FIELD_MAP[label]];
+        if (v === undefined || v === null || v === '') continue;
+        row[label] = v;
+        itemKeys.add(label);
+      }
+      if (d.DLY_APP_SUM != null && d.DLY_AFT_SUM != null) {
+        row['합계(납기후)'] = Number(d.DLY_APP_SUM) + Number(d.DLY_AFT_SUM);
+        itemKeys.add('합계(납기후)');
+      }
+
+      // 검침내역(사용량) — 단가는 항목 금액÷사용량으로 역산
+      for (const m of METER_MAP) {
+        const use = Number(d[`USE_QTY${m.idx}`] || 0);
+        const amt = Number(d[`ITEM_AMT${m.code}`] || 0);
+        if (!use && !amt) continue;
+        row[`검침_${m.key}_전월`] = d[`BEF_METER${m.idx}`];
+        row[`검침_${m.key}_당월`] = d[`CURR_METER${m.idx}`];
+        row[`검침_${m.key}_요금`] = use > 0 ? Math.round(amt / use) : '';
+        itemKeys.add(`검침_${m.key}_전월`);
+        itemKeys.add(`검침_${m.key}_당월`);
+        itemKeys.add(`검침_${m.key}_요금`);
+      }
+
       out.push(row);
     }
 

@@ -1,9 +1,10 @@
 /**
  * MAIN world 스크립트 — 페이지의 실제 JS 컨텍스트에서 실행됨.
- * 1) XHR을 가로채서 관리비 항목별 상세조회(impo_703m01_div_106.ajax 전용)의
- *    viewInfo 등 파라미터 템플릿을 확보 — div_107 등 다른 div와 정규식이 겹치면
- *    엉뚱한 템플릿을 캡처해 항목 코드가 undefined로 나오는 문제가 있었어서
- *    div_106만 정확히 매칭하도록 제한함.
+ * 1) XHR을 가로채서 impo_703m01_div_*.ajax(세대 클릭 시 XpERP가 한번에 쏘는
+ *    div_1/2/3/55/106/107 등) 응답 원본을 수동 캡처 — 이 중 div_107이 세대 1개
+ *    클릭만으로 전체 세대의 항목별 금액+검침값+청구서요약을 한 번에 주는 벌크
+ *    응답이라, 세대별 반복 조회(div_106) 없이 이걸로 전체 수집이 가능함
+ *    (2026-07-24 디버그 캡처로 확인). content.js가 이 캡처를 실제 수집에 사용.
  * 2) window.IBSheet 데이터를 읽어 content.js(ISOLATED world)에 postMessage로 전달.
  *
  * IBSheet 필드 값이 문자열이 아니라 DOM 엘리먼트로 오는 경우가 있어 gv()로 통일 처리.
@@ -15,7 +16,7 @@
     try { return String(v.innerText ?? v.textContent ?? '').trim(); } catch { return ''; }
   }
 
-  // ── 1) viewInfo 템플릿 캡처 (div_106 전용) ──────────────────
+  // ── 1) div_*.ajax 응답 원본 캡처 ─────────────────────────────
   const origOpen = XMLHttpRequest.prototype.open;
   const origSend = XMLHttpRequest.prototype.send;
   const DIV_RE = /impo_703m01_div_(\d+)\.ajax/;
@@ -26,13 +27,6 @@
   XMLHttpRequest.prototype.send = function (body) {
     try {
       const url = this.__aihelperUrl || '';
-      if (typeof body === 'string' && body.includes('viewInfo=') && /impo_703m01_div_106\.ajax/.test(url)) {
-        window.postMessage({ __aihelper: true, kind: 'template', body }, '*');
-      }
-
-      // 디버그: 세대 클릭 시 동시에 호출되는 div_1/2/3/55/106/107 등 모든 div의
-      // 원본 응답을 수동으로 캡처(검침값·청구서 요약값이 어느 div에 있는지 조사용).
-      // 정상 수집 흐름(위 템플릿 캡처)과는 별개로 항상 동작.
       const divMatch = url.match(DIV_RE);
       if (divMatch) {
         const divNo = divMatch[1];
